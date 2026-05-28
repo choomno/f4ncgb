@@ -1,3 +1,9 @@
+v1.0.1
+======
+
+## Fixes
+  - Fix bug from not resetting global variables
+
 v1.0.0
 ======
 

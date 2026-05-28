@@ -141,6 +141,11 @@ f4ncgb_main(parser_context& context,
             f4ncgb_add_cb add_cb,
             f4ncgb_end_poly_cb end_poly_cb) {
 
+  // reset global variables in case they were changed by previous call
+  input_denoms.clear();
+  reduce_mode = false;
+  reduce_denom_c = 1;
+
   return boost::mp11::mp_with_index<F4NCGB_MAX_BLOCKS>(
     context.num_blocks(),
     [&context,
