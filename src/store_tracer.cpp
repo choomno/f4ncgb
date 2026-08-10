@@ -23,6 +23,6 @@ store_tracer::access(unsigned long i) {
     = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_)
         .count();
 
-  fprintf(file_.get(), "%lu %lu\n", i, stamp);
+  fprintf(file_.get(), "%lu %lld\n", i, static_cast<long long>(stamp));
 }
 }

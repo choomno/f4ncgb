@@ -10,9 +10,6 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 option(ENABLE_PROFILING "Enable tracking statistics" ON)
 option(SHARED_LIB "Build the f4ncgb library shared instead of static" OFF)
 option(ENABLE_FUZZER "Enable building the fuzzer, if available" OFF)
-option(ENABLE_FAST_MERSENNE_PRIME_MODULO "Enable fast mersenne prime modulo operation" ON)
-option(ENABLE_MONOMIAL_PRODUCTS_MAP "Track and cache monomial products in map (usually slower)" OFF)
-option(ENABLE_COMPACT_MONOMIAL_MAP "Use a more compact map for lookups in the monomial store (usually slower)" OFF)
 option(ENABLE_STORE_TRACE "Enable a (very expensive) trace of each access (operator[]) into a store." OFF)
 option(ENABLE_STORE_DUMP "Enable a (very expensive) dump when deconstructing a store." OFF)
 option(ENABLE_NATIVE "Enable -march=native to target the host CPU (creates non-portable binaries)" ON)
@@ -23,8 +20,8 @@ set(MAX_BLOCKS 16 CACHE STRING "Maximum number of blocks to compile for. Must be
 
 set(F4NCGB_SRCS
   src/api.cpp
-  src/store.cpp
-  src/signal_statistics.cpp
+  src/solve.cpp
+  src/diagnostics.cpp
   src/parser.cpp
   src/monomial_trie.cpp
   src/primes.cpp
@@ -36,12 +33,7 @@ set(F4NCGB_TEST_SRCS
   src/test.cpp
   src/test_simple.cpp
   src/test_parse.cpp
-  src/test_fast_div.cpp
 )
-
-if(ENABLE_PROFILING)
-  set(F4NCGB_SRCS ${F4NCGB_SRCS} src/profiling.cpp)
-endif()
 
 set(F4NCGB_TARGETS
   src/f4ncgb.cpp
@@ -126,27 +118,6 @@ endif()
 target_compile_definitions(f4ncgb PUBLIC F4NCGB_MAX_BLOCKS=${MAX_BLOCKS})
 message(STATUS "Compiling with " ${MAX_BLOCKS} " maximum blocks")
 
-if(ENABLE_FAST_MERSENNE_PRIME_MODULO)
-  message(STATUS "Fast % 2^31-1 (mersenne prime) modulo operation is enabled")
-  target_compile_definitions(f4ncgb PUBLIC F4NCGB_FAST_MERSENNE_PRIME_MODULO)
-else()
-  message(STATUS "Fast % 2^31-1 (mersenne prime) modulo operation is disabled")
-endif()
-
-if(ENABLE_MONOMIAL_PRODUCTS_MAP)
-  message(STATUS "Monomial products map is enabled")
-  target_compile_definitions(f4ncgb PUBLIC F4NCGB_USE_MONOMIAL_PRODUCTS_MAP)
-else()
-  message(STATUS "Monomial products map is disabled")
-endif()
-
-if(ENABLE_COMPACT_MONOMIAL_MAP)
-  message(STATUS "Compact monomial map is enabled")
-  target_compile_definitions(f4ncgb PUBLIC F4NCGB_USE_COMPACT_MONOMIAL_MAP)
-else()
-  message(STATUS "Compact monomial map is disabled")
-endif()
-
 if(ENABLE_STORE_TRACE)
   message(STATUS "Store tracing is enabled")
   target_compile_definitions(f4ncgb PUBLIC F4NCGB_ENABLE_STORE_TRACE)
@@ -212,12 +183,6 @@ target_include_directories(f4ncgb_bin PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 
 if(ENABLE_PROFILING)
   target_compile_definitions(f4ncgb PUBLIC F4NCGB_ENABLE_PROFILING)
-
-  # This target makes no sense otherwise.
-  add_executable(mod_prime_tester src/mod_prime_tester.cpp)
-  target_link_libraries(mod_prime_tester PUBLIC Boost::boost Boost::program_options)
-  target_include_directories(mod_prime_tester PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-  target_compile_definitions(mod_prime_tester PUBLIC F4NCGB_ENABLE_PROFILING)
 endif()
 
 include(CheckIPOSupported)

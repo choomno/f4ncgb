@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <array>
 #include <boost/functional/hash.hpp>
-#include <boost/unordered/unordered_map.hpp>
 #include <span>
 
 namespace f4ncgb {
@@ -17,7 +16,7 @@ size_t inline compute_hash(const std::array<I, 7>& values) noexcept {
   return seed;
 }
 
-// container to store when two monomials overlaps
+// container to store when two monomials overlap
 template<typename I>
 struct ambiguity {
   std::array<I, 7> values;
@@ -51,9 +50,8 @@ struct ambiguity {
     return (hash_ == other.hash_) and (values == other.values);
   }
 
-  template<typename PS>
-  void prepare(PS& poly,
-               boost::unordered_map<mon_id, poly_id>& lm_to_poly) const {
+  template<typename PS, typename LmMap>
+  void prepare(PS& poly, LmMap& lm_to_poly) const {
     poly_id ii = lm_to_poly[i()];
     poly_id jj = lm_to_poly[j()];
 
@@ -63,28 +61,13 @@ struct ambiguity {
   }
 };
 
-// Custom hash function
-template<typename I>
-struct ambiguity_hash {
-  inline size_t operator()(const ambiguity<I>& a) const noexcept {
-    return a.hash_;
-  }
-};
-
-// template<class T, std::size_t N, std::size_t M>
-// constexpr inline bool
-// startswith(std::span<T, N> data, std::span<T, M> prefix) noexcept {
-//   return data.size() >= prefix.size()
-//          && std::equal(prefix.begin(), prefix.end(), data.begin());
-// }
-
 template<class T, std::size_t N, std::size_t M>
 constexpr inline bool
 endswith(std::span<T, N> data, std::span<T, M> suffix) noexcept {
   return data.size() >= suffix.size()
          && std::equal(data.end() - static_cast<long>(suffix.size()),
                        data.end(),
-                       suffix.end() - static_cast<long>(suffix.size()));
+                       suffix.begin());
 }
 }
 

@@ -3,28 +3,31 @@
 #include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <map>
 #include <numeric>
 #include <ostream>
-#include <set>
 #include <utility>
 #include <vector>
 
 #include <boost/align/align_down.hpp>
 #include <boost/align/align_up.hpp>
 #include <boost/container/small_vector.hpp>
-#include <boost/unordered/unordered_map.hpp>
-#include <boost/unordered/unordered_set.hpp>
+#include <boost/unordered/unordered_flat_map.hpp>
+#include <boost/unordered/unordered_flat_set.hpp>
 
 #include "ambiguity.hpp"
 #include "coeff.hpp"
+#include "diagnostics.hpp"
 #include "f4ncgb.hpp"
 #include "linear_algebra.hpp"
+#include "options.hpp"
+#include "output.hpp"
 #include "parser.hpp"
-#include "profiling.hpp"
-#include "signal_statistics.hpp"
+#include "solve_state.hpp"
 #include "sparse_rref/thread_pool.hpp"
 
 #include "monomial_trie.hpp"
+#include "polynomial_store.hpp"
 #include "store.hpp"
 
 namespace f4ncgb {
@@ -54,38 +57,22 @@ struct f4 {
   using poly_id = I;
 
   using ambiguity_ = ambiguity<mon_id>;
-  using amb_hash = ambiguity_hash<mon_id>;
   using crit_pair = std::pair<poly_id, poly_id>;
 
   using monomial_trie_ = monomial_trie<V, I>;
 
-  // Custom hash function for std::span
-  struct monomial_hash {
-    size_t operator()(const monomial& m) const {
-      size_t seed = 0;
-      for(auto it = m.begin(); it != m.end(); it++)
-        boost::hash_combine(seed, *it);
-      return seed;
-    }
-  };
-
-  // Custom equality comparator for std::span
-  struct monomial_equal {
-    bool operator()(const monomial& m1, const monomial& m2) const {
-      return m1.size() == m2.size()
-             && std::equal(m1.begin(), m1.end(), m2.begin());
-    }
-  };
-
   public:
+  /// Names, for printing monomials back out, and for reading the input.
   parser_context& context;
+  /// What this computation was asked to do.
+  const solve_options& opts;
 
   monomial_store mons;
   polynomial_store poly;
   std::vector<poly_id> basis;
   std::map<size_t, std::vector<ambiguity_>> amb;
   std::vector<ambiguity_> crit_pairs;
-  boost::unordered_map<mon_id, poly_id> lm_to_poly;
+  boost::unordered_flat_map<mon_id, poly_id> lm_to_poly;
   monomial_trie_ prefix_trie;
   monomial_trie_ suffix_trie;
   monomial_trie_ gm_trie;
@@ -93,6 +80,10 @@ struct f4 {
   std::vector<poly_id> spolies;
   std::vector<poly_id> reducers;
   std::vector<mon_id> columns;
+
+  /// Everything the parser and the linear algebra need to see of this
+  /// computation. Owning it here is what keeps concurrent solves apart.
+  solve_state state;
 
   size_t characteristic = 0;
   size_t iter = 0;
@@ -105,27 +96,28 @@ struct f4 {
 
   std::ofstream proof_file;
 
-  f4(parser_context& context_)
+  f4(parser_context& context_, const solve_options& opts_)
     : context(context_)
+    , opts(opts_)
     , mons()
     , poly(mons)
-    , prefix_trie(context.num_vars())
-    , suffix_trie(context.num_vars())
-    , gm_trie(context.num_vars())
-    , characteristic(context.characteristic())
-    , maxiter(context.maxiter())
-    , maxdeg(context.maxdeg())
-    , tracer(context.tracer()) {
+    , prefix_trie(opts_.num_vars)
+    , suffix_trie(opts_.num_vars)
+    , gm_trie(opts_.num_vars)
+    , characteristic(opts_.characteristic)
+    , maxiter(opts_.maxiter)
+    , maxdeg(opts_.maxdeg)
+    , tracer(opts_.tracer) {
 
-    proof_level = context.proof_level();
+    state.proof_level = opts.proof_level;
 
-    mons.set_blocks(context.block_sizes());
+    mons.set_blocks(opts.block_sizes());
 
-    if(context.threads() > 1)
-      pool = std::make_unique<BS::thread_pool<BS::none>>(context.threads());
+    if(opts.threads > 1)
+      pool = std::make_unique<BS::thread_pool<BS::none>>(opts.threads);
 
-    if(context.proof_file() != "") {
-      proof_file.open(context.proof_file(), std::ios_base::trunc);
+    if(opts.proof_file != "") {
+      proof_file.open(opts.proof_file, std::ios_base::trunc);
       if(!proof_file)
         die(19, "Failed to open proof file.");
     }
@@ -147,7 +139,7 @@ struct f4 {
     triplet t;
 
     cofactor(coeff c_, mon_id a_, int i_, mon_id b_)
-      : c(c_)
+      : c(std::move(c_))
       , t(a_, i_, b_) {}
 
     inline mon_id a() const { return t.a; }
@@ -167,7 +159,7 @@ struct f4 {
         o << (rc.sign() > 0 ? " + " : " ");
       o << rc << "*";
       if(t.a != 0) {
-        context.to_msolve_mon(o, mon, t.a, false);
+        write_monomial(o, context, mon, t.a, false);
         o << "*";
       }
       if(t.i >= 0)
@@ -176,7 +168,7 @@ struct f4 {
         o << "[i" << -t.i - 1 << "]";
       if(t.b != 0) {
         o << "*";
-        context.to_msolve_mon(o, mon, t.b, false);
+        write_monomial(o, context, mon, t.b, false);
       }
     }
   };
@@ -186,16 +178,18 @@ struct f4 {
   std::vector<std::vector<cofactor>> cofactors;
   //------------------------------------------------------------------------------
   inline parse_res read_input(parser_context& context) {
-    parse_res res = parse_rest_into_polynomial_store(context, poly);
+    parse_res res
+      = parse_rest_into_polynomial_store(context, poly, state.input_denoms);
     // Print in case of doubt.
-    // context.to_msolve(std::cout, poly);
+    // write_all(std::cout, context, opts, poly);
     return res;
   }
   //------------------------------------------------------------------------------
   inline void write_basis(std::ostream& o) {
     bool first = true;
+    const coeff* denom = state.reduce_mode ? &state.reduce_denom_c : nullptr;
     for(size_t n = 1; n < basis.size(); n++) {
-      context.to_msolve_poly(o, poly, basis[n], first, reduce_mode);
+      write_polynomial(o, context, poly, basis[n], first, denom);
       first = false;
     }
     o << "\n";
@@ -213,7 +207,7 @@ struct f4 {
         add(userdata, nullptr, nullptr, 0, nullptr);
       } else {
         auto coeff_it = poly.get_coefficients(poly_id).begin();
-        coeff lc = reduce_mode ? reduce_denom_c : *coeff_it;
+        coeff lc = state.reduce_mode ? state.reduce_denom_c : *coeff_it;
         for(const auto mon_id : poly[poly_id]) {
           auto vars = mons[mon_id];
           data.clear();
@@ -229,7 +223,7 @@ struct f4 {
   std::vector<poly_id> new_elements;
   void interreduce_and_add_to_basis(std::vector<poly_id>& polies) {
 
-    interreduce = true;
+    state.interreduce = true;
 
     if(verbose > 1)
       msg("Linearly interreducing input of size %d.", polies.size());
@@ -237,12 +231,15 @@ struct f4 {
     size_t i = 0;
     for(const auto& p : polies) {
       spolies.push_back(p);
-      if(proof_level > 0)
+      if(state.proof_level > 0)
         extended_spolies.emplace_back(0, i++, 0);
     }
 
     // to leave 0th position open; just like in basis
     cofactors.emplace_back();
+
+    // there is no basis yet, so this only collects the columns
+    symbolic_preprocessing();
 
     // reduce and store result in new_elements
     reduction();
@@ -252,7 +249,7 @@ struct f4 {
 
     update_basis_and_amb();
 
-    interreduce = false;
+    state.interreduce = false;
 
     if(verbose > 0)
       msg("==== Interreduction finished. Basis has now %d elements ====",
@@ -315,12 +312,15 @@ struct f4 {
     poly_id p = input.back();
     input.pop_back();
 
-    // set parameters for reduce path
-    reduce_mode = true;
+    // Set the parameters for the reduce path. Both overrides are deliberate:
+    // the normal form is read back out of the cofactors, so proof logging has
+    // to be on whatever the caller asked for, and the reduction runs for a
+    // bounded number of rounds rather than the caller's iteration budget.
+    state.reduce_mode = true;
     maxiter = 10;
-    proof_level = 1;
-    reduce_denom_c = input_denoms.back();
-    input_denoms.pop_back();
+    state.proof_level = 1;
+    state.reduce_denom_c = state.input_denoms.back();
+    state.input_denoms.pop_back();
 
     // interreduce input
     interreduce_and_add_to_basis(input);
@@ -349,7 +349,7 @@ struct f4 {
 
     // nonzero reduction + set up normalization coeff
     poly_id normal_form = new_elements[0];
-    reduce_denom_c = cofactors.back().back().c;
+    state.reduce_denom_c = cofactors.back().back().c;
 
     basis.clear();
     basis.push_back(0);
@@ -382,6 +382,16 @@ struct f4 {
   //------------------------------------------------------------------------------
   std::vector<char> to_remove;
   std::vector<mon_id> next_same_ci;
+  /// Drops the ambiguities that Gebauer and Moeller's criteria make redundant
+  /// and files the rest under their degree.
+  ///
+  /// The two sorts look like one too many -- deduplicating through a hash set
+  /// would be cheaper than sorting 48-byte ambiguities by (hash, values). They
+  /// are not interchangeable though: that first sort is what puts the list in a
+  /// canonical order, the second one can tie, and the filter below depends on
+  /// which of two tied ambiguities it sees first. Replacing it changes which
+  /// ambiguities get dropped, unless the second sort is given a total
+  /// tie-break.
   void gebauer_moeller(std::vector<ambiguity_>& new_amb) {
     // first index is always the newer polynomial
 
@@ -501,15 +511,21 @@ struct f4 {
       F4NCGB_TIME(inclusion);
       // inclusions with m = ABC
       I d = m.size();
-      // k determines where B starts in m = ABC
-      for(const auto& [j, k] : inclusions) {
-        if(i == j)
-          continue;
-        b = mons[j];
-        I aj = mons.getid(m.first(k));
-        I cj = mons.getid(m.last(d - k - b.size()));
-        ambiguity_ a(d, i, j, 0, 0, aj, cj);
-        new_amb.push_back(a);
+      // Every one of these has degree |m|, so the bound is checked once for all
+      // of them rather than per match. It can only bite when an input
+      // polynomial is itself longer than the bound: everything derived later is
+      // bounded by the ambiguities it came from.
+      if(d <= maxdeg) {
+        // k determines where B starts in m = ABC
+        for(const auto& [j, k] : inclusions) {
+          if(i == j)
+            continue;
+          b = mons[j];
+          I aj = mons.getid(m.first(k));
+          I cj = mons.getid(m.last(d - k - b.size()));
+          ambiguity_ a(d, i, j, 0, 0, aj, cj);
+          new_amb.push_back(a);
+        }
       }
       inclusions.clear();
 
@@ -536,15 +552,31 @@ struct f4 {
 
   //------------------------------------------------------------------------------
 
+  boost::unordered_flat_set<mon_id> todo_seen;
+  std::vector<mon_id> todo_vec;
+
+  /// Collects the rows of the next matrix into spolies/reducers, and its
+  /// columns into `columns`.
+  ///
+  /// The columns come for free: every monomial of every row is passed to
+  /// push_todo() anyway, so `todo_seen` is exactly the column set. Only the
+  /// critical pairs' leading monomials are held back from the queue -- they are
+  /// pivots, and looking for a reducer for them would add a redundant row -- so
+  /// those go straight into `columns`.
   void symbolic_preprocessing() {
     F4NCGB_TIME(sym_pre);
 
-    boost::unordered_set<mon_id> todo_seen;
-    std::vector<mon_id> todo_vec;
     size_t todo_pos = 0;
     reducers.clear();
+    columns.clear();
+    todo_vec.clear();
+    todo_seen.clear();
     todo_vec.reserve(1L << 16);
     todo_seen.reserve(1L << 16);
+
+    // rows the caller staged: the whole input during interreduction, the
+    // polynomial to be reduced in reduce_mode
+    const size_t staged_spolies = spolies.size();
 
     auto push_todo = [&](mon_id m) {
       // insert into vector only if new
@@ -554,14 +586,16 @@ struct f4 {
 
     auto handle_spoly = [&](poly_id p, auto ai, auto i, auto ci) {
       spolies.push_back(p);
-      if(proof_level > 0)
-        extended_spolies.emplace_back(ai, poly.get_idx(lm_to_poly[i]), ci);
+      if(state.proof_level > 0)
+        extended_spolies.emplace_back(
+          ai, static_cast<int>(poly.get_idx(lm_to_poly[i])), ci);
     };
 
     auto handle_reducer = [&](poly_id p, auto ai, auto i, auto ci) {
       reducers.push_back(p);
-      if(proof_level > 0)
-        extended_reducers.emplace_back(ai, poly.get_idx(lm_to_poly[i]), ci);
+      if(state.proof_level > 0)
+        extended_reducers.emplace_back(
+          ai, static_cast<int>(poly.get_idx(lm_to_poly[i])), ci);
     };
 
     // assumes that crit pairs are sorted by lm
@@ -574,6 +608,10 @@ struct f4 {
 
       mon_id lm = mons_f[0];
       bool first_time = todo_seen.insert(lm).second;
+
+      // a pivot column, deliberately not queued for a reducer search
+      if(first_time)
+        columns.push_back(lm);
 
       // lm never seen -> one into reducers
       // lm seen before -> both in spolies
@@ -595,12 +633,9 @@ struct f4 {
     }
     crit_pairs.clear();
 
-    // separate path for reduced_form
-    if(reduce_mode) {
-      auto mons_f = poly[spolies[0]];
-      for(const auto m : mons_f)
+    for(size_t i = 0; i < staged_spolies; i++)
+      for(const auto m : poly[spolies[i]])
         push_todo(m);
-    }
 
     while(todo_pos < todo_vec.size()) {
       mon_id m = todo_vec[todo_pos++];
@@ -617,14 +652,18 @@ struct f4 {
   }
   //------------------------------------------------------------------------------
   poly_id find_reducer(mon_id m) {
+    // Strategy: the smallest leading monomial, and of its occurrences the last
+    // one. Stating it here rather than leaning on the order the trie happens to
+    // report in keeps the choice -- and with it the whole basis -- independent
+    // of how the search works.
     auto& red = prefix_trie.divisors(mons[m]);
     if(red.empty())
       return 0;
-
-    // strategy  : the one with smallest lm
     std::pair<mon_id, size_t> match
-      = *std::max_element(red.begin(), red.end(), [this](auto a, auto b) {
-          return this->mons.template cmp<block_order>(b.first, a.first);
+      = *std::min_element(red.begin(), red.end(), [this](auto a, auto b) {
+          if(a.first != b.first)
+            return this->mons.template cmp<block_order>(a.first, b.first);
+          return a.second > b.second;
         });
 
     monomial mm = mons[m];
@@ -633,8 +672,8 @@ struct f4 {
     mon_id b = mons.getid(mm.last(mm.size() - match.second - lm.size()));
     poly_id g = lm_to_poly[match.first];
 
-    if(proof_level > 0)
-      extended_reducers.emplace_back(a, poly.get_idx(g), b);
+    if(state.proof_level > 0)
+      extended_reducers.emplace_back(a, static_cast<int>(poly.get_idx(g)), b);
 
     poly_id res = poly.multiply_front_and_back(a, g, b);
 
@@ -645,7 +684,7 @@ struct f4 {
   void log_cofactors() {
 
     // compute expanded proofs
-    if(proof_level > 1 and basis.size() > 1) {
+    if(state.proof_level > 1 and basis.size() > 1) {
       std::vector<cofactor> expanded;
       for(size_t n = basis.size(); n < cofactors.size(); n++) {
         expanded.clear();
@@ -663,7 +702,7 @@ struct f4 {
         cofactors[n] = std::move(expanded);
       }
       // non-expanded proof
-    } else if(proof_level == 1) {
+    } else if(state.proof_level == 1) {
       // mark input
       if(basis.size() == 1)
         for(size_t n = basis.size(); n < cofactors.size(); n++)
@@ -718,7 +757,7 @@ struct f4 {
         res.push_back(poly.add_polynomial(p));
         p.clear();
         cur_i = i;
-        if(proof_level > 0) {
+        if(state.proof_level > 0) {
           cofactors.emplace_back(std::move(current_cofactors));
           current_cofactors.clear();
         }
@@ -729,7 +768,7 @@ struct f4 {
       assert(!c.is_zero());
 
       if(j < n) {
-        p.emplace_back(c, columns[j]);
+        p.emplace_back(std::move(c), columns[j]);
       } else {
         size_t idx = j - n;
         if(idx < extended_reducers.size()) {
@@ -749,7 +788,7 @@ struct f4 {
     }
     // don't forget to add last element
     res.push_back(poly.add_polynomial(p));
-    if(proof_level > 0)
+    if(state.proof_level > 0)
       cofactors.emplace_back(std::move(current_cofactors));
 
     extended_spolies.clear();
@@ -768,12 +807,12 @@ struct f4 {
     for(size_t i : perm)
       tmp.push_back(vec[i]);
     vec.swap(tmp);
-  };
+  }
   //------------------------------------------------------------------------------
 
   void sort_rows(std::vector<poly_id>& to_sort,
                  std::vector<triplet>& extended,
-                 boost::unordered_map<mon_id, size_t>& col_to_id) {
+                 const boost::unordered_flat_map<mon_id, uint32_t>& col_to_id) {
     // sort rows (+ extended_rows accordingly)
     // first by lm (smaller first), then by support (smaller first)
 
@@ -782,9 +821,9 @@ struct f4 {
     std::vector<size_t> perm(m);
     std::iota(perm.begin(), perm.end(), 0);
 
-    std::vector<size_t> lm_col(m);
+    std::vector<uint32_t> lm_col(m);
     for(size_t i = 0; i < m; i++)
-      lm_col[i] = col_to_id[poly.get_lm_id(to_sort[i])];
+      lm_col[i] = col_to_id.at(poly.get_lm_id(to_sort[i]));
 
     auto cmp = [&](size_t a, size_t b) {
       if(lm_col[a] != lm_col[b])
@@ -794,22 +833,85 @@ struct f4 {
     std::sort(perm.begin(), perm.end(), cmp);
 
     apply_perm(to_sort, perm);
-    if(proof_level > 0) {
+    if(state.proof_level > 0) {
       apply_perm(extended, perm);
-      if(interreduce and &to_sort == &spolies)
-        apply_perm(input_denoms, perm);
+      if(state.interreduce and &to_sort == &spolies)
+        apply_perm(state.input_denoms, perm);
     }
   }
   //------------------------------------------------------------------------------
 
   std::vector<std::span<coeff>> entries_spol;
-  std::vector<std::vector<size_t>> idxs_spol;
+  csr_indices idxs_spol;
   std::vector<std::span<coeff>> entries_red;
-  std::vector<std::vector<size_t>> idxs_red;
+  csr_indices idxs_red;
+  /// Length and leading variables of a monomial, packed so that comparing the
+  /// two integers agrees with the monomial order. Equal keys decide nothing and
+  /// fall back to the full comparison.
+  ///
+  /// Only valid for the plain degree order: a block order ranks by per-block
+  /// degrees, which this does not capture.
+  inline uint64_t sort_key(mon_id m) const {
+    const monomial v = mons[m];
+
+    // one shared key for monomials too long to encode, so they always fall back
+    if(v.size() >= 0xffff)
+      return ~uint64_t(0);
+
+    constexpr size_t bits = 8 * sizeof(V);
+    constexpr size_t packed = 48 / bits;
+
+    uint64_t key = static_cast<uint64_t>(v.size()) << 48;
+    const size_t n = std::min(packed, v.size());
+    for(size_t i = 0; i < n; i++)
+      key |= static_cast<uint64_t>(v[i]) << (48 - bits * (i + 1));
+    return key;
+  }
+
+  std::vector<std::pair<uint64_t, mon_id>> keyed_columns;
+  /// Puts the columns collected by symbolic_preprocessing() in DESCENDING
+  /// order.
+  void sort_columns() {
+    columns.insert(columns.end(), todo_vec.begin(), todo_vec.end());
+
+    if constexpr(block_order) {
+      std::sort(
+        columns.begin(), columns.end(), [this](const mon_id a, const mon_id b) {
+          return this->mons.template cmp<block_order>(b, a);
+        });
+      return;
+    }
+
+    // Sorting on the packed key keeps the comparator out of the monomial pool:
+    // it would otherwise chase two random pointers per comparison, of which
+    // there are O(n log n).
+    keyed_columns.clear();
+    keyed_columns.reserve(columns.size());
+    for(const auto m : columns)
+      keyed_columns.emplace_back(sort_key(m), m);
+
+    std::sort(keyed_columns.begin(),
+              keyed_columns.end(),
+              [this](const auto& x, const auto& y) {
+                if(x.first != y.first)
+                  return x.first > y.first;
+                return this->mons.template cmp<block_order>(y.second, x.second);
+              });
+
+    columns.clear();
+    for(const auto& [key, m] : keyed_columns)
+      columns.push_back(m);
+  }
+
+  boost::unordered_flat_map<mon_id, uint32_t> col_to_id;
   void prepare_matrix() {
 
-    boost::unordered_map<mon_id, size_t> col_to_id;
-    size_t i = 0;
+    sort_columns();
+    state.nr_cols = columns.size();
+
+    col_to_id.clear();
+    col_to_id.reserve(columns.size());
+    uint32_t i = 0;
     for(const auto c : columns)
       col_to_id[c] = i++;
 
@@ -824,66 +926,36 @@ struct f4 {
     idxs_red.clear();
 
     entries_spol.reserve(spolies.size());
-    idxs_spol.resize(spolies.size());
     entries_red.reserve(reducers.size());
-    idxs_red.resize(reducers.size());
 
-    i = 0;
-    for(const auto r : spolies) {
-      entries_spol.push_back(poly.get_coefficients(r));
-      for(const auto m : poly[r])
-        idxs_spol[i].push_back(col_to_id[m]);
-      i++;
-    }
-    i = 0;
-    for(const auto r : reducers) {
-      entries_red.push_back(poly.get_coefficients(r));
-      for(const auto m : poly[r])
-        idxs_red[i].push_back(col_to_id[m]);
-      i++;
-    }
-  }
-
-  //------------------------------------------------------------------------------
-  boost::unordered_set<mon_id> col_set;
-  void prepare_columns() {
-
-    // make columns
-    // columns are sorted in DESCENDING order
-    col_set.clear();
-    for(const auto r : spolies) {
-      auto p = poly[r];
-      col_set.insert(p.begin(), p.end());
-    }
-    for(const auto r : reducers) {
-      auto p = poly[r];
-      col_set.insert(p.begin(), p.end());
-    }
-
-    columns.clear();
-    columns.resize(
-      static_cast<size_t>(std::distance(col_set.begin(), col_set.end())));
-    std::move(col_set.begin(), col_set.end(), columns.begin());
-
-    auto cmp = [this](const mon_id a, const mon_id b) {
-      return this->mons.template cmp<block_order>(b, a);
+    auto collect_rows = [this](const std::vector<poly_id>& rows,
+                               std::vector<std::span<coeff>>& entries,
+                               csr_indices& idxs) {
+      for(const auto r : rows) {
+        entries.push_back(poly.get_coefficients(r));
+        for(const auto m : poly[r])
+          idxs.push(col_to_id.at(m));
+        idxs.end_row();
+      }
     };
-    std::sort(columns.begin(), columns.end(), cmp);
 
-    nr_cols = columns.size();
+    collect_rows(spolies, entries_spol, idxs_spol);
+    collect_rows(reducers, entries_red, idxs_red);
   }
+
   //------------------------------------------------------------------------------
 
   void reduction() {
-    // make columns
-    prepare_columns();
 
-    // prepare entries
-    prepare_matrix();
+    {
+      F4NCGB_TIME(matrix_setup);
+      prepare_matrix();
+    }
 
     // reduction
     F4NCGB_PROFILE(auto timer = gstats.time(gstats.reduction));
-    auto [idxs, entries] = linear_algebra(idxs_spol,
+    auto [idxs, entries] = linear_algebra(state,
+                                          idxs_spol,
                                           idxs_red,
                                           entries_spol,
                                           entries_red,
@@ -901,12 +973,12 @@ struct f4 {
   void update_basis_and_amb() {
 
     // log cofactors
-    if(proof_level > 0 and !reduce_mode) {
+    if(state.proof_level > 0 and !state.reduce_mode) {
       F4NCGB_TIME(other);
       log_cofactors();
     }
 
-    uint16_t n = basis.size();
+    uint32_t n = basis.size();
     for(const poly_id p_id : new_elements) {
       // only do all of this if we don't termiante next iteration
       if(iter < maxiter) {
@@ -920,7 +992,7 @@ struct f4 {
         suffix_trie.insert_rev(m, m_id);
 
         // compute ambiguities
-        if(!reduce_mode) {
+        if(!state.reduce_mode) {
           F4NCGB_TIME(amb);
           compute_ambiguities(m_id);
         }

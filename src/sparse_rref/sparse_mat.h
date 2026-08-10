@@ -115,12 +115,6 @@ sparse_mat_init_trace(sparse_mat_ro_t<T> mat, ulong len) {
 }
 
 template<typename T>
-inline void
-sparse_mat_reset_trace(sparse_mat_ro_t<T> mat) {
-  std::fill(mat->trace, mat->trace + mat->trace_len, false);
-}
-
-template<typename T>
 inline ulong
 sparse_mat_nnz(const sparse_mat_t<T> mat) {
   ulong nnz = 0;

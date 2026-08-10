@@ -40,6 +40,17 @@ isdigit_(char c) {
   return c >= '0' && c <= '9';
 }
 
+/// Numbers are read into fixed-width integers, so one that does not fit has to
+/// be rejected rather than silently wrapped. Check after every read that could
+/// have seen user digits.
+#define EXPECT_NO_OVERFLOW()                          \
+  do {                                                \
+    if(number_overflow_) {                            \
+      number_overflow_ = false;                       \
+      RETURN_ERROR("Number is too large to be read"); \
+    }                                                 \
+  } while(false)
+
 #define EXPECT_DIGIT()                                            \
   do {                                                            \
     if(!isdigit_(current_c())) {                                  \
@@ -131,11 +142,16 @@ parser_context::impl_msolve(parse_add_cb add_cb,
       if(isdigit_(c)) {
         EXPECT_POSNEGDIGIT();
         numerator = read_positive_or_negative_int() * numerator;
+        EXPECT_NO_OVERFLOW();
         c = swallow_whitespace_no_newline();
         denominator = 1;
         if(c == '/') {
           c = getc();
           denominator = read_positive_int();
+          EXPECT_NO_OVERFLOW();
+          if(denominator == 0) {
+            RETURN_ERROR("Denominator must not be 0!");
+          }
           rational = true;
         }
         c = swallow_whitespace_no_newline();
@@ -162,6 +178,7 @@ parser_context::impl_msolve(parse_add_cb add_cb,
           c = swallow_whitespace_no_newline();
           EXPECT_DIGIT();
           size_t sup = read_positive_int();
+          EXPECT_NO_OVERFLOW();
           if(sup > 1000) {
             return "Exponent too high";
           }
@@ -230,9 +247,6 @@ parse_res
 parser_context::impl_msolve_header(char first_char, char second_char) {
   // Handle the first two characters first, then process the rest of the input.
 
-  // Msolve always has 1 block.
-  num_blocks_ = 1;
-
   if(first_char == ',') {
     RETURN_ERROR("First character of msolve must be some ident, not ','");
   }
@@ -242,7 +256,7 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
     std::string ident;
     ident += first_char;
     str_to_id(ident);
-    ++num_vars_;
+    ++opts_->num_vars;
   } else if(parser_context::msolve_ident_filter(first_char)
             && parser_context::msolve_ident_filter(second_char)) {
     c = getc();
@@ -252,7 +266,7 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
       ident += second_char;
       str_to_id(ident);
       // Some variable name was started and finished with the third char.
-      ++num_vars_;
+      ++opts_->num_vars;
     } else if(parser_context::msolve_ident_filter(c)) {
       // Some variable name was started but not finished yet, read until finish.
       std::string ident(read_ident(parser_context::msolve_ident_filter));
@@ -261,7 +275,7 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
       prefix += second_char;
       ident.insert(0, prefix);
       str_to_id(ident);
-      ++num_vars_;
+      ++opts_->num_vars;
     } else {
       RETURN_ERROR(
         std::format("Unexpected third character for msolve format: '{}'", c));
@@ -276,16 +290,16 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
 
   // Now, we have the first ident and are either at a ',' or at the end of the
   // variables with '\n'
-  assert(num_vars_ == 1);
+  assert(opts_->num_vars == 1);
   if(c != '\n' && c != ',' && c != ' ') {
     RETURN_ERROR(std::format(
       "Unexpected msolve parse state after first variable, have c: '{}'", c));
   }
 
-  blocks_.emplace_back();
-  blocks_[0].emplace_back(1);
+  opts_->blocks.emplace_back();
+  opts_->blocks[0].emplace_back(1);
 
-  auto* current_block = &blocks_[0];
+  auto* current_block = &opts_->blocks[0];
 
   while(true) {
     c = swallow_whitespace_no_newline();
@@ -302,14 +316,14 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
       swallow_whitespace_no_newline();
       if(c == '\n') {
         getc();
-        blocks_.emplace_back();
-        current_block = &blocks_[blocks_.size() - 1];
+        opts_->blocks.emplace_back();
+        current_block = &opts_->blocks[opts_->blocks.size() - 1];
         // Swallow as much as needed until there is something again.
         swallow_whitespace_and_newline();
       }
       auto id = str_to_id(read_ident(parser_context::msolve_ident_filter));
       current_block->emplace_back(id);
-      ++num_vars_;
+      ++opts_->num_vars;
     } else {
       RETURN_ERROR(std::format("Unexpected character '{}'", c));
     }
@@ -324,7 +338,8 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
 
   // Read the characteristic.
   EXPECT_DIGIT();
-  characteristic_ = read_positive_int();
+  opts_->characteristic = read_positive_int();
+  EXPECT_NO_OVERFLOW();
 
   // Step over newline.
   if(c == '\r') {
@@ -355,7 +370,7 @@ parser_context::impl_poly_gen(parse_add_cb add_cb,
   // The number of variables was already given in the header. Now, the blocks
   // are read.
   size_t block = 0;
-  while(block < num_blocks_) {
+  while(block < opts_->num_blocks()) {
     if constexpr(std::is_same_v<typeof(getV), typeof(read_numeric_var)>) {
       EXPECT_DIGIT();
     }
@@ -363,7 +378,7 @@ parser_context::impl_poly_gen(parse_add_cb add_cb,
     if(v == 0) {
       ++block;
     } else {
-      blocks_[block].push_back(v);
+      opts_->blocks[block].push_back(v);
     }
     swallow_whitespace_and_newline();
   }
@@ -383,9 +398,11 @@ parser_context::impl_poly_gen(parse_add_cb add_cb,
         swallow_whitespace_and_newline();
         EXPECT_POSNEGDIGIT();
         long numerator = read_positive_or_negative_int();
+        EXPECT_NO_OVERFLOW();
         swallow_whitespace_and_newline();
         EXPECT_DIGIT();
         long denominator = static_cast<long>(read_positive_int());
+        EXPECT_NO_OVERFLOW();
 
         if(denominator == 0) {
           RETURN_ERROR("Denominator must not be 0!");
@@ -458,7 +475,8 @@ parser_context::impl_sympoly(parse_add_cb add_cb,
 }
 
 parse_res
-parser_context::parse_header() {
+parser_context::parse_header(solve_options& opts) {
+  opts_ = &opts;
   // Parsing procedure:
   //
   // 1. Decide on format to use based on first few read characters.
@@ -533,18 +551,21 @@ parser_context::parse_header() {
   getc();
   EXPECT_DIGIT();
 
-  num_vars_ = read_positive_int();
+  opts_->num_vars = read_positive_int();
+  EXPECT_NO_OVERFLOW();
   EXPECT(' ');
   c = getc();
   EXPECT_DIGIT();
-  num_blocks_ = read_positive_int();
-  if(num_blocks_ > 100)
+  const size_t num_blocks = read_positive_int();
+  EXPECT_NO_OVERFLOW();
+  if(num_blocks > 100)
     return "too many blocks";
-  blocks_.resize(num_blocks_);
+  opts_->blocks.resize(num_blocks);
   EXPECT(' ');
   c = getc();
   EXPECT_DIGIT();
-  characteristic_ = read_positive_int();
+  opts_->characteristic = read_positive_int();
+  EXPECT_NO_OVERFLOW();
   EXPECT('\n');
   getc();// Swallow the newline.
 
@@ -555,7 +576,6 @@ parser_context::parse_header() {
 #ifdef __linux__
 void
 dummy_parse_string(std::string input) {
-  (void)input;
   int add_cb_count = 0;
   int boundary_cb_count = 0;
 
@@ -586,12 +606,13 @@ dummy_parse_string(std::string input) {
   }
 
   parser_context ctx(f);
+  solve_options opts;
 
-  parse(ctx, add_cb, boundary_cb);
+  parse(ctx, opts, add_cb, boundary_cb);
 }
 #else
 void
-dummy_parse_string(std::string input) {}
+dummy_parse_string(std::string) {}
 #endif
 
 }

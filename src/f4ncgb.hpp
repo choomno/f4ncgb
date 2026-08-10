@@ -122,6 +122,12 @@ class Solver {
   };
   std::unique_ptr<f4ncgb_handle, Deleter> handle_;
 
+  /// Every setter reports failure the same way: a message, or null on success.
+  static void check(const char* msg) {
+    if(msg)
+      throw std::runtime_error(msg);
+  }
+
   public:
   Solver() { handle_.reset(f4ncgb_init()); }
   ~Solver() = default;
@@ -129,170 +135,103 @@ class Solver {
   f4ncgb_state state() const { return f4ncgb_get_state(handle_.get()); }
 
   void add(long numerator, long denominator, std::vector<uint32_t> vars) {
-    const char* msg = f4ncgb_add(
-      handle_.get(), numerator, denominator, vars.size(), vars.data());
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
+    check(f4ncgb_add(
+      handle_.get(), numerator, denominator, vars.size(), vars.data()));
   }
 
-  void end_poly() {
-    const char* msg = f4ncgb_end_poly(handle_.get());
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
-  }
+  void end_poly() { check(f4ncgb_end_poly(handle_.get())); }
 
   void set_blocks(std::vector<uint32_t> b) {
-    const char* msg = f4ncgb_set_blocks(handle_.get(), b.size(), b.data());
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
+    check(f4ncgb_set_blocks(handle_.get(), b.size(), b.data()));
   }
   void set_nvars(uint32_t nvars) {
-    const char* msg = f4ncgb_set_nvars(handle_.get(), nvars);
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
+    check(f4ncgb_set_nvars(handle_.get(), nvars));
   }
   void set_characteristic(uint32_t characteristic) {
-    const char* msg = f4ncgb_set_characteristic(handle_.get(), characteristic);
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
+    check(f4ncgb_set_characteristic(handle_.get(), characteristic));
   }
   void set_maxiter(uint32_t maxiter) {
-    const char* msg = f4ncgb_set_maxiter(handle_.get(), maxiter);
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
+    check(f4ncgb_set_maxiter(handle_.get(), maxiter));
   }
   void set_maxdeg(uint32_t maxdeg) {
-    const char* msg = f4ncgb_set_maxdeg(handle_.get(), maxdeg);
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
+    check(f4ncgb_set_maxdeg(handle_.get(), maxdeg));
   }
   void set_threads(uint32_t threads) {
-    const char* msg = f4ncgb_set_threads(handle_.get(), threads);
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
+    check(f4ncgb_set_threads(handle_.get(), threads));
   }
   void set_tracer(bool tracer) {
-    const char* msg = f4ncgb_set_tracer(handle_.get(), tracer);
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
+    check(f4ncgb_set_tracer(handle_.get(), tracer));
   }
   void set_expanded_proof(bool expanded) {
-    const char* msg = f4ncgb_set_expanded_proof(handle_.get(), expanded);
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
+    check(f4ncgb_set_expanded_proof(handle_.get(), expanded));
   }
   void set_output_file(const std::string& output_file) {
-    const char* msg
-      = f4ncgb_set_output_file(handle_.get(), output_file.c_str());
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
+    check(f4ncgb_set_output_file(handle_.get(), output_file.c_str()));
   }
   void set_proof_file(const std::string& proof_file) {
-    const char* msg = f4ncgb_set_proof_file(handle_.get(), proof_file.c_str());
-    if(msg) {
-      throw std::runtime_error(msg);
-    }
+    check(f4ncgb_set_proof_file(handle_.get(), proof_file.c_str()));
   }
 
   using add_cb = std::function<void(fmpz_t, fmpz_t, std::span<const uint32_t>)>;
   using end_poly_cb = std::function<void()>;
 
-  f4ncgb_result solve(add_cb add, end_poly_cb end) {
-    struct meta {
-      add_cb a;
-      end_poly_cb e;
-    };
-    meta m{ add, end };
-
-    auto c_add_cb = [](void* userdata,
-                       fmpz_t numerator,
-                       fmpz_t denominator,
-                       size_t varcount,
-                       const uint32_t* vars) {
-      meta& m = *static_cast<meta*>(userdata);
-      return m.a(
-        numerator, denominator, std::span<const uint32_t>(vars, varcount));
-    };
-    auto c_end_poly_cb = [](void* userdata) {
-      meta& m = *static_cast<meta*>(userdata);
-      return m.e();
-    };
-
-    return f4ncgb_solve(
-      handle_.get(), static_cast<void*>(&m), c_add_cb, c_end_poly_cb);
-  }
-
-  f4ncgb_result reduce(add_cb add, end_poly_cb end) {
-    struct meta {
-      add_cb a;
-      end_poly_cb e;
-    };
-    meta m{ add, end };
-
-    auto c_add_cb = [](void* userdata,
-                       fmpz_t numerator,
-                       fmpz_t denominator,
-                       size_t varcount,
-                       const uint32_t* vars) {
-      meta& m = *static_cast<meta*>(userdata);
-      return m.a(
-        numerator, denominator, std::span<const uint32_t>(vars, varcount));
-    };
-    auto c_end_poly_cb = [](void* userdata) {
-      meta& m = *static_cast<meta*>(userdata);
-      return m.e();
-    };
-
-    return f4ncgb_reduce(
-      handle_.get(), static_cast<void*>(&m), c_add_cb, c_end_poly_cb);
-  }
-
   using monomial = std::vector<uint32_t>;
   using polynomial = std::vector<std::tuple<coeff, coeff, monomial>>;
 
-  std::pair<f4ncgb_result, std::vector<polynomial>> solve() {
-    std::vector<polynomial> polys;
-    bool create = true;
-    f4ncgb_result res = solve(
-      [&polys, &create](
-        fmpz_t numerator, fmpz_t denominator, std::span<const uint32_t> vars) {
-        if(create) {
-          polys.emplace_back();
-          create = false;
-        }
-        coeff num;
-        coeff den;
-        if(numerator)
-          fmpz_set(num.value, numerator);
-        else
-          fmpz_set_ui(num.value, 0);
-        if(denominator)
-          fmpz_set(den.value, denominator);
-        else
-          fmpz_set_ui(den.value, 1);
+  /// The C entry points, which solve() and reduce() differ only by.
+  using entry_point = f4ncgb_result (*)(f4ncgb_handle*,
+                                        void*,
+                                        f4ncgb_add_cb,
+                                        f4ncgb_end_poly_cb);
 
-        polys.back().emplace_back(
-          num, den, std::vector<uint32_t>(vars.begin(), vars.end()));
-      },
-      [&create]() { create = true; });
-    return std::make_pair(res, std::move(polys));
+  f4ncgb_result solve(add_cb add, end_poly_cb end) {
+    return run(f4ncgb_solve, add, end);
+  }
+  f4ncgb_result reduce(add_cb add, end_poly_cb end) {
+    return run(f4ncgb_reduce, add, end);
   }
 
+  std::pair<f4ncgb_result, std::vector<polynomial>> solve() {
+    return collect(f4ncgb_solve);
+  }
   std::pair<f4ncgb_result, std::vector<polynomial>> reduce() {
+    return collect(f4ncgb_reduce);
+  }
+
+  private:
+  /// Hands the two std::functions to the C API as a pair of plain callbacks.
+  f4ncgb_result run(entry_point entry, add_cb add, end_poly_cb end) {
+    struct meta {
+      add_cb a;
+      end_poly_cb e;
+    };
+    meta m{ add, end };
+
+    auto c_add_cb = [](void* userdata,
+                       fmpz_t numerator,
+                       fmpz_t denominator,
+                       size_t varcount,
+                       const uint32_t* vars) {
+      meta& m = *static_cast<meta*>(userdata);
+      return m.a(
+        numerator, denominator, std::span<const uint32_t>(vars, varcount));
+    };
+    auto c_end_poly_cb = [](void* userdata) {
+      meta& m = *static_cast<meta*>(userdata);
+      return m.e();
+    };
+
+    return entry(
+      handle_.get(), static_cast<void*>(&m), c_add_cb, c_end_poly_cb);
+  }
+
+  /// Gathers what the callbacks report into one polynomial per end_poly.
+  std::pair<f4ncgb_result, std::vector<polynomial>> collect(entry_point entry) {
     std::vector<polynomial> polys;
     bool create = true;
-    f4ncgb_result res = reduce(
+
+    f4ncgb_result res = run(
+      entry,
       [&polys, &create](
         fmpz_t numerator, fmpz_t denominator, std::span<const uint32_t> vars) {
         if(create) {
@@ -314,6 +253,7 @@ class Solver {
           num, den, std::vector<uint32_t>(vars.begin(), vars.end()));
       },
       [&create]() { create = true; });
+
     return std::make_pair(res, std::move(polys));
   }
 };

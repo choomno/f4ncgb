@@ -1,6 +1,7 @@
+#include "diagnostics.hpp"
 #include "f4ncgb.hpp"
 #include "parser.hpp"
-#include "signal_statistics.hpp"
+#include "solve.hpp"
 #include <climits>
 #include <config.hpp>
 #include <numeric>
@@ -15,17 +16,23 @@ using namespace f4ncgb;
     return "no handle given"; \
   }
 
+/// Every setter needs a handle that is not in the middle of a computation.
+#define REQUIRE_READY(h)                      \
+  REQUIRE_HANDLE(h)                           \
+  if(h->state != F4NCGB_STATE_READY) {        \
+    return "invalid state, must be in READY"; \
+  }
+
 using monomial = std::vector<uint32_t>;
 using polynomial = std::vector<std::tuple<long, long, monomial>>;
 
 typedef struct f4ncgb_handle {
   f4ncgb_state state = F4NCGB_STATE_READY;
-  uint32_t maxiter = 10;
-  uint32_t maxdeg = UINT_MAX;
   const char* output_file = "";
   const char* proof_file = "";
 
   parser_context ctx;
+  solve_options opts;
 
   polynomial current_polynomial;
   std::vector<polynomial> polynomials;
@@ -83,10 +90,7 @@ f4ncgb_add(f4ncgb_handle* h,
            long denominator,
            size_t varcount,
            uint32_t* vars) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
+  REQUIRE_READY(h);
 
   if(varcount) {
     h->current_polynomial.emplace_back(
@@ -99,10 +103,7 @@ f4ncgb_add(f4ncgb_handle* h,
 
 extern "C" const char*
 f4ncgb_end_poly(f4ncgb_handle* h) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
+  REQUIRE_READY(h);
   h->polynomials.emplace_back(h->current_polynomial);
   h->current_polynomial.clear();
   return nullptr;
@@ -112,26 +113,24 @@ extern "C" const char*
 f4ncgb_set_blocks(f4ncgb_handle* h,
                   uint32_t blockcount,
                   uint32_t* blocklengths) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
+  REQUIRE_READY(h);
 
   if(blockcount > F4NCGB_MAX_BLOCKS)
     return "more blocks than current compilation allows";
 
-  h->ctx.blocks_.resize(blockcount);
+  h->opts.blocks.resize(blockcount);
   uint32_t v = 1;
   for(size_t i = 0; i < blockcount; ++i) {
-    h->ctx.blocks_[i].resize(blocklengths[i]);
-    auto begin = h->ctx.blocks_[i].begin();
-    auto end = h->ctx.blocks_[i].end();
+    h->opts.blocks[i].resize(blocklengths[i]);
+    auto begin = h->opts.blocks[i].begin();
+    auto end = h->opts.blocks[i].end();
     std::iota(begin, end, v);
     v += blocklengths[i];
   }
 
-  if(h->ctx.num_vars() == 0) {
-    h->ctx.num_vars_ = v;
+  // v has run past the last variable, which is numbered v - 1
+  if(h->opts.num_vars == 0) {
+    h->opts.num_vars = v - 1;
   }
 
   return nullptr;
@@ -139,20 +138,14 @@ f4ncgb_set_blocks(f4ncgb_handle* h,
 
 extern "C" const char*
 f4ncgb_set_nvars(f4ncgb_handle* h, uint32_t nvars) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
-  h->ctx.num_vars_ = nvars;
+  REQUIRE_READY(h);
+  h->opts.num_vars = nvars;
   return nullptr;
 }
 
 extern "C" const char*
 f4ncgb_set_characteristic(f4ncgb_handle* h, uint32_t characteristic) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
+  REQUIRE_READY(h);
 
   if(characteristic > 2147483647l) {// 2^31 -1
     return "provided characteristic %lu is too large. Only p < 2^31 supported";
@@ -160,82 +153,59 @@ f4ncgb_set_characteristic(f4ncgb_handle* h, uint32_t characteristic) {
     return "provided nonzero characteristic is not prime";
   }
 
-  h->ctx.characteristic_ = characteristic;
+  h->opts.characteristic = characteristic;
   return nullptr;
 }
 
 extern "C" const char*
 f4ncgb_set_maxiter(f4ncgb_handle* h, uint32_t maxiter) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
-  h->maxiter = maxiter;
-  h->ctx.maxiter_ = maxiter;
+  REQUIRE_READY(h);
+  h->opts.maxiter = maxiter;
   return nullptr;
 }
 
 extern "C" const char*
 f4ncgb_set_maxdeg(f4ncgb_handle* h, uint32_t maxdeg) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
-  h->maxdeg = maxdeg;
-  h->ctx.maxdeg_ = maxdeg;
+  REQUIRE_READY(h);
+  h->opts.maxdeg = maxdeg;
   return nullptr;
 }
 
 extern "C" const char*
 f4ncgb_set_threads(f4ncgb_handle* h, uint32_t threads) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
-  h->ctx.threads_ = threads;
+  REQUIRE_READY(h);
+  h->opts.threads = threads;
   return nullptr;
 }
 
 extern "C" const char*
 f4ncgb_set_output_file(f4ncgb_handle* h, const char* output_file) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
+  REQUIRE_READY(h);
   h->output_file = output_file;
   return nullptr;
 }
 
 extern "C" const char*
 f4ncgb_set_proof_file(f4ncgb_handle* h, const char* proof_file) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
+  REQUIRE_READY(h);
   h->proof_file = proof_file;
-  h->ctx.proof_file_ = proof_file;
-  h->ctx.proof_level_ = std::max(size_t(1), h->ctx.proof_level());
+  h->opts.proof_file = proof_file;
+  h->opts.proof_level = std::max(size_t(1), h->opts.proof_level);
   return nullptr;
 }
 
 extern "C" const char*
 f4ncgb_set_expanded_proof(f4ncgb_handle* h, bool expanded) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
+  REQUIRE_READY(h);
   if(expanded)
-    h->ctx.proof_level_ = 2;
+    h->opts.proof_level = 2;
   return nullptr;
 }
 
 extern "C" const char*
 f4ncgb_set_tracer(f4ncgb_handle* h, bool tracer) {
-  REQUIRE_HANDLE(h);
-  if(h->state != F4NCGB_STATE_READY) {
-    return "invalid state, must be in READY";
-  }
-  h->ctx.tracer_ = tracer;
+  REQUIRE_READY(h);
+  h->opts.tracer = tracer;
   return nullptr;
 }
 
@@ -245,38 +215,37 @@ f4ncgb_solve_intern_(f4ncgb_handle* h,
                      f4ncgb_add_cb add_cb,
                      f4ncgb_end_poly_cb end_cb,
                      bool reduce) {
-  if(h->ctx.num_vars() > 0 && h->ctx.num_blocks() == 0) {
-    h->ctx.blocks_.emplace_back();
-    h->ctx.blocks_[0].resize(h->ctx.num_vars() + 1);
-    auto begin = h->ctx.blocks_[0].begin();
-    auto end = h->ctx.blocks_[0].end();
+  // variables are numbered 1..num_vars, so a single block holds exactly that
+  // many
+  if(h->opts.num_vars > 0 && h->opts.num_blocks() == 0) {
+    h->opts.blocks.emplace_back();
+    h->opts.blocks[0].resize(h->opts.num_vars);
+    auto begin = h->opts.blocks[0].begin();
+    auto end = h->opts.blocks[0].end();
     std::iota(begin, end, 1);
   }
-  h->ctx.num_blocks_ = h->ctx.blocks_.size();
 
-  if(h->ctx.num_vars() == 0)
+  if(h->opts.num_vars == 0)
     return F4NCGB_ARGERROR;
-  if(h->ctx.num_blocks() > F4NCGB_MAX_BLOCKS)
+  if(h->opts.num_blocks() > F4NCGB_MAX_BLOCKS)
     return F4NCGB_ARGERROR;
-  if(h->ctx.characteristic() > 2147483647l)// 2^31 -1
+  if(h->opts.characteristic > 2147483647l)// 2^31 -1
     return F4NCGB_ARGERROR;
-  if(h->ctx.characteristic() != 0 and !n_is_prime(h->ctx.characteristic()))
+  if(h->opts.characteristic != 0 and !n_is_prime(h->opts.characteristic))
     return F4NCGB_ARGERROR;
-  if(!h->proof_file and h->ctx.proof_level() > 0)
+  if(!h->proof_file and h->opts.proof_level > 0)
     return F4NCGB_ARGERROR;
 
-  h->ctx.reduce_ = reduce;
+  h->opts.reduce = reduce;
 
   h->state = F4NCGB_STATE_SOLVING;
 
   int res = f4ncgb::f4ncgb_main(h->ctx,
-                                h->output_file,
-                                nullptr,
-                                false, /* No leaking */
-                                false, /* No problem printing */
-                                userdata,
-                                add_cb,
-                                end_cb);
+                                h->opts,
+                                { .output_name = h->output_file,
+                                  .userdata = userdata,
+                                  .add_cb = add_cb,
+                                  .end_poly_cb = end_cb });
 
   h->state = F4NCGB_STATE_READY;
 

@@ -5,11 +5,11 @@
 #include <filesystem>
 #include <string.h>
 
+#include "diagnostics.hpp"
 #include "f4ncgb.hpp"
+#include "options.hpp"
 #include "parser.hpp"
-#include "profiling.hpp"
-#include "signal_statistics.hpp"
-#include "store.hpp"
+#include "solve.hpp"
 #include <flint/ulong_extras.h>
 
 #include <boost/program_options.hpp>
@@ -132,21 +132,22 @@ main(int argc, char** argv) {
 #endif
 
   parser_context context;
+  solve_options opts;
   parse_res r;
   {
     F4NCGB_TIME(parse);
     context.open(in);
-    r = context.parse_header();
+    r = context.parse_header(opts);
   }
   if(r.has_value()) {
     std::cerr << *r << std::endl;
     die(17, "Error in parsing input file.");
   }
 
-  if(context.num_blocks() > F4NCGB_MAX_BLOCKS)
+  if(opts.num_blocks() > F4NCGB_MAX_BLOCKS)
     die(4, "More blocks than current compilation allows.");
 
-  size_t characteristic = context.characteristic();
+  size_t characteristic = opts.characteristic;
   if(characteristic > 2147483647l)// 2^31 -1
     die(err_prime_too_big,
         "Provided characteristic %lu is too large. Only p < 2^31 supported",
@@ -164,19 +165,22 @@ main(int argc, char** argv) {
   if(expanded_proof)
     user_proof_level = 2;
 
-  context.maxiter_ = maxiter;
-  context.maxdeg_ = maxdeg;
-  context.proof_level_ = user_proof_level;
-  context.tracer_ = tracer;
-  context.threads_ = threads;
-  context.proof_file_ = proof_file;
-  context.reduce_ = reduce;
+  opts.maxiter = maxiter;
+  opts.maxdeg = maxdeg;
+  opts.proof_level = user_proof_level;
+  opts.tracer = tracer;
+  opts.threads = threads;
+  opts.proof_file = proof_file;
+  opts.reduce = reduce;
 
-  res = f4ncgb::f4ncgb_main(context,
-                            output_name,
-                            &print_statistics_fun,
-                            true, /* Memory Leaking in the binary is ok */
-                            print_problem);
+  res = f4ncgb::f4ncgb_main(
+    context,
+    opts,
+    { .output_name = output_name,
+      .stats_print_function = &print_statistics_fun,
+      /* the process exits right after, so skipping teardown is safe */
+      .leak_memory = true,
+      .print_read_problem = print_problem });
 
   F4NCGB_PROFILE(gstats.print(threads));
   return res;

@@ -1,21 +1,15 @@
 #include <algorithm>
 #include <atomic>
-#include <boost/unordered/unordered_map.hpp>
+#include <boost/unordered/unordered_flat_map.hpp>
 #include <cstddef>
 #include <cstdint>
-#include <gmp.h>
-#include <map>
-#include <ranges>
-#include <set>
 #include <span>
 #include <utility>
 #include <vector>
 
 #include "coeff.hpp"
-#include "fast_div.hpp"
+#include "diagnostics.hpp"
 #include "primes.hpp"
-#include "profiling.hpp"
-#include "signal_statistics.hpp"
 #include "sparse_rref/sparse_mat.h"
 #include "store.hpp"
 
@@ -25,35 +19,51 @@ extern int verbose;
 
 namespace f4ncgb {
 
-static size_t nrows_total;
-static bool use_trace;
-uint32_mat_ro_t red_mat;
-boost::unordered_map<const coeff*, size_t> ref_rows;
+/// Scratch state of one call to linear_algebra(), shared by its helpers and by
+/// the elimination tasks. One per call, so concurrent solves stay apart.
+struct la_context {
+  /// Reducer matrix, built once and reused for every prime.
+  uint32_mat_ro_t red_mat = {};
+  /// Column -> reducer row that has its pivot there, -1 if there is none.
+  std::vector<int32_t> red_pivots;
+  /// Reducer rows share coefficient arrays. For each row, the first row using
+  /// the same array -- the only one whose entries are actually stored.
+  std::vector<uint32_t> ref_row;
+  size_t nrows_total = 0;
+  bool use_trace = true;
+};
 
-void inline set_up_reducer_mat(const std::vector<std::vector<size_t>>& idxs,
+void inline set_up_reducer_mat(la_context& la,
+                               const solve_state& state,
+                               const csr_indices& idxs,
                                const std::vector<std::span<coeff>>& entries) {
-  const size_t nrows = idxs.size();
-  size_t ncols = nr_cols;
+  auto& red_mat = la.red_mat;
+  auto& ref_row = la.ref_row;
+  const size_t nrows = idxs.rows();
+  size_t ncols = state.nr_cols;
 
-  ref_rows.clear();
+  // first pass: compute total nnz and unique_nnz, and resolve every row to the
+  // first one sharing its coefficients. Hashing the pointers once here saves a
+  // lookup per row per prime later on.
+  boost::unordered_flat_map<const coeff*, uint32_t> first_row;
+  first_row.reserve(nrows);
+  ref_row.resize(nrows);
 
-  // first pass: compute total nnz and unique_nnz
-  // also remember first row for each unique span
   size_t nnz = 0;
   size_t unique_nnz = 0;
   for(size_t i = 0; i < nrows; i++) {
     nnz += idxs[i].size();
-    const coeff* ptr = entries[i].data();
-    if(ref_rows.find(ptr) == ref_rows.end()) {
-      ref_rows[ptr] = i;
+    auto [it, inserted]
+      = first_row.try_emplace(entries[i].data(), static_cast<uint32_t>(i));
+    ref_row[i] = it->second;
+    if(inserted)
       unique_nnz += idxs[i].size();
-    }
   }
 
-  if(proof_level > 0) {
+  if(state.proof_level > 0) {
     nnz += nrows;
-    unique_nnz += ref_rows.size();
-    ncols += nrows_total;
+    unique_nnz += first_row.size();
+    ncols += la.nrows_total;
   }
 
   sparse_mat_ro_init(red_mat, nrows, ncols, nnz, unique_nnz);
@@ -80,37 +90,36 @@ void inline set_up_reducer_mat(const std::vector<std::vector<size_t>>& idxs,
       indices[idx_k++] = j;
 
     // store coeff offset
-    const coeff* ptr = entries[i].data();
-    size_t ref_row = ref_rows[ptr];
-    if(i == ref_row) {
+    if(i == ref_row[i]) {
       row_start[i] = entry_k;
       entry_k += idxs[i].size();
     } else {
-      row_start[i] = row_start[ref_row];
+      row_start[i] = row_start[ref_row[i]];
     }
 
     // store transformation matrix
-    if(proof_level > 0) {
+    if(state.proof_level > 0) {
       row_nnz[i] += 1;
-      indices[idx_k++] = nr_cols + i;
-      if(i == ref_row)
+      indices[idx_k++] = state.nr_cols + i;
+      if(i == ref_row[i])
         entry_k++;
     }
   }
 }
 //------------------------------------------------------------------------------
-bool inline fill_reducer_mat(const std::vector<std::span<coeff>>& entries,
+bool inline fill_reducer_mat(la_context& la,
+                             const solve_state& state,
+                             const std::vector<std::span<coeff>>& entries,
                              nmod_t mod) {
-
+  auto& red_mat = la.red_mat;
   uint32_t* mat_entries = red_mat->entries;
 
   // only fill entries for first occurrence of each span
   for(size_t i = 0; i < red_mat->nrow; i++) {
     std::span<coeff> coeffs = entries[i];
-    const coeff* ptr = coeffs.data();
 
     // just a duplicate -> nothing to do
-    if(ref_rows[ptr] != i)
+    if(la.ref_row[i] != i)
       continue;
 
     // check leading coeff for zero
@@ -126,15 +135,16 @@ bool inline fill_reducer_mat(const std::vector<std::span<coeff>>& entries,
       cc = fmpz_get_nmod(coeffs[j].value, mod);
       mat_entries[k++] = nmod_mul(inv, cc, mod);
     }
-    if(proof_level > 0)
+    if(state.proof_level > 0)
       mat_entries[k++] = 1;
   }
   return true;
 }
 
 //------------------------------------------------------------------------------
-std::vector<int32_t> red_pivots;
-void inline set_reducer_pivots() {
+void inline set_reducer_pivots(la_context& la) {
+  auto& red_mat = la.red_mat;
+  auto& red_pivots = la.red_pivots;
   // clear
   red_pivots.resize(red_mat->ncol);
   std::fill(red_pivots.begin(), red_pivots.end(), -1);
@@ -147,36 +157,63 @@ void inline set_reducer_pivots() {
 
 //------------------------------------------------------------------------------
 
-bool
-set_up_spol_matrix(uint32_mat_t mat,
+/// A prime is unusable if it kills the leading coefficient of a row, because
+/// that row loses its pivot.
+///
+/// This has to be decided before the matrix is built: bailing out of
+/// set_up_spol_matrix() half-way would leave the remaining rows uninitialized,
+/// while sparse_mat_clear() goes on to free every one of them.
+bool inline spol_pivots_survive(const la_context& la,
+                                const std::vector<std::span<coeff>>& entries,
+                                nmod_t mod) {
+  for(size_t i = 0; i < entries.size(); i++) {
+    // rows known to reduce to zero are never filled
+    if(la.red_mat->trace[i] or entries[i].empty())
+      continue;
+    if(!fmpz_get_nmod(entries[i][0].value, mod))
+      return false;
+  }
+  return true;
+}
+
+//------------------------------------------------------------------------------
+
+/// Only call once spol_pivots_survive() has accepted this prime.
+void
+set_up_spol_matrix(const la_context& la,
+                   const solve_state& state,
+                   uint32_mat_t mat,
                    nmod_t mod,
-                   const std::vector<std::vector<size_t>>& idxs,
+                   const csr_indices& idxs,
                    const std::vector<std::span<coeff>>& entries) {
-  const size_t nrows = idxs.size();
+  const size_t nrows = idxs.rows();
 
   // ---- initialize matrix ----
-  if(proof_level > 0)
-    sparse_mat_init(mat, nrows, nr_cols + nrows_total);
+  if(state.proof_level > 0)
+    sparse_mat_init(mat, nrows, state.nr_cols + la.nrows_total);
   else
-    sparse_mat_init(mat, nrows, nr_cols);
+    sparse_mat_init(mat, nrows, state.nr_cols);
 
   if(verbose > 2)
-    msg("S-Pol matrix has size (%d, %d)", mat->nrow, mat->ncol);
+    msg("S-Pol matrix has size (%d, %d) with %d nonzeros",
+        mat->nrow,
+        mat->ncol,
+        idxs.data.size());
 
   // ---- fill rows ----
-  uint32_t offset = nr_cols + nrows_total - nrows;
+  uint32_t offset = state.nr_cols + la.nrows_total - nrows;
   for(size_t i = 0; i < nrows; i++) {
 
-    if(red_mat->trace[i]) {
+    if(la.red_mat->trace[i]) {
       // dummy init to be safe
       sparse_mat_row_init(mat, i, 0);
       continue;
     }
 
     std::span<coeff> coeffs = entries[i];
-    const auto& cols = idxs[i];
+    const auto cols = idxs[i];
 
-    const size_t max_nnz = coeffs.size() + (proof_level > 0 ? 1 : 0);
+    const size_t max_nnz = coeffs.size() + (state.proof_level > 0 ? 1 : 0);
 
     auto row = sparse_mat_row_init(mat, i, max_nnz);
 
@@ -189,32 +226,29 @@ set_up_spol_matrix(uint32_mat_t mat,
         row->entries[nnz] = c;
         nnz++;
       }
-      // ---- detect zero leading entry ----
-      if(nnz == 0)
-        return false;
     }
+    // the leading entry survives, spol_pivots_survive() made sure of it
+    assert(coeffs.empty() or nnz > 0);
 
     // ---- transformation block ----
-    if(proof_level > 0) {
+    if(state.proof_level > 0) {
       row->indices[nnz] = offset + i;
       // insert denom from input polynomial
-      if(interreduce) {
-        row->entries[nnz] = fmpz_get_nmod(input_denoms[i].value, mod);
-      } else if(reduce_mode) {
-        row->entries[nnz] = fmpz_get_nmod(reduce_denom_c.value, mod);
+      if(state.interreduce) {
+        row->entries[nnz] = fmpz_get_nmod(state.input_denoms[i].value, mod);
+      } else if(state.reduce_mode) {
+        row->entries[nnz] = fmpz_get_nmod(state.reduce_denom_c.value, mod);
       } else
         row->entries[nnz] = fmpz_get_nmod(coeffs[0].value, mod);
       nnz++;
     }
     row->nnz = nnz;
   }
-
-  return true;
 }
 //------------------------------------------------------------------------------
 
 inline int
-cmp_pivots(pivots x, pivots y) {
+cmp_pivots(const pivots& x, const pivots& y) {
   if(x.size() < y.size())
     return -1;
   else if(x.size() > y.size())
@@ -228,23 +262,29 @@ cmp_pivots(pivots x, pivots y) {
 }
 //------------------------------------------------------------------------------
 
+/// Largest coefficient in absolute value, which bounds how big the modulus has
+/// to grow before the result can be reconstructed.
 static inline coeff
-height(const std::vector<std::span<coeff>>& entries_spol,
+height(const la_context& la,
+       const std::vector<std::span<coeff>>& entries_spol,
        const std::vector<std::span<coeff>>& entries_red) {
 
   coeff h(0L);
-  for(auto row : entries_spol) {
+  auto visit = [&h](const std::span<coeff>& row) {
     for(const auto& c : row) {
       if(fmpz_cmpabs(c.value, h.value) > 0)
         fmpz_abs(h.value, c.value);
     }
-  }
-  for(auto row : entries_red) {
-    for(const auto& c : row) {
-      if(fmpz_cmpabs(c.value, h.value) > 0)
-        fmpz_abs(h.value, c.value);
-    }
-  }
+  };
+
+  for(const auto& row : entries_spol)
+    visit(row);
+
+  // Reducer rows share coefficient arrays -- only 14-33 % of them are distinct
+  // on these benchmarks -- and ref_row already says which row owns each one.
+  for(size_t i = 0; i < entries_red.size(); i++)
+    if(la.ref_row[i] == i)
+      visit(entries_red[i]);
 
   return h;
 }
@@ -259,20 +299,26 @@ crt_reconstruction(fmpz*& entries,
   if(rrefs.size() == 0)
     return;
 
-  // get all (i,j) where at least one rref is nonzero
-  std::map<size_t, std::set<size_t>> nnz_pos;
-  for(const auto& rref : rrefs) {
-    for(size_t i = 0; i < n_piv; i++) {
+  // Columns nonzero in at least one of the rrefs, per row. Rows are dense in i,
+  // so this is a vector of sorted vectors rather than a map of sets: the
+  // entries are then read off with one cursor per rref instead of a binary
+  // search each.
+  std::vector<std::vector<uint32_t>> nnz_pos(n_piv);
+  for(size_t i = 0; i < n_piv; i++) {
+    auto& cols = nnz_pos[i];
+    for(const auto& rref : rrefs) {
       auto row = sparse_mat_row(rref, i);
       // we have cleared all syzygy rows completely (also the transformation
       // matrix) thus, any row within n_piv must have nonzer polynomial part
-      nnz_pos[i].insert(row->indices, row->indices + row->nnz);
+      cols.insert(cols.end(), row->indices, row->indices + row->nnz);
     }
+    std::sort(cols.begin(), cols.end());
+    cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
   }
 
   size_t nnz = 0;
-  for(const auto& [key, values] : nnz_pos)
-    nnz += values.size();
+  for(const auto& cols : nnz_pos)
+    nnz += cols.size();
   idxs.reserve(nnz);
 
   size_t len = primes.size();
@@ -293,13 +339,21 @@ crt_reconstruction(fmpz*& entries,
   for(size_t i = 0; i < rrefs.size(); i++)
     fmpz_init(inputs + i);
 
+  // one cursor per rref, walked forward in lockstep with the column list
+  std::vector<uint32_t> cursor(rrefs.size());
+
   size_t idx = 0;
   for(size_t i = 0; i < n_piv; i++) {
-    for(const auto j : nnz_pos[i]) {
+    std::fill(cursor.begin(), cursor.end(), 0);
+    for(const uint32_t j : nnz_pos[i]) {
       idxs.emplace_back(i, j);
       for(size_t k = 0; k < rrefs.size(); k++) {
-        uint32_t c = sparse_mat_entry(rrefs[k], i, j);
-        fmpz_set_ui(inputs + k, c);
+        auto row = sparse_mat_row(rrefs[k], i);
+        uint32_t& at = cursor[k];
+        while(at < row->nnz and row->indices[at] < j)
+          at++;
+        const bool hit = at < row->nnz and row->indices[at] == j;
+        fmpz_set_ui(inputs + k, hit ? row->entries[at] : 0);
       }
       fmpz_multi_CRT_precomp(entries + idx++, crt_base, inputs, 0);
     }
@@ -357,119 +411,15 @@ verify_result(fmpz* nums,
 }
 //------------------------------------------------------------------------------
 
-struct ratrec_data {
-  mpz_t mod;
-  mpz_t N;
-  mpz_t r0;
-  mpz_t r1;
-  mpz_t t0;
-  mpz_t t1;
-  mpz_t q;
-  mpz_t tmp;
-  mpz_t n;
-  mpz_t d;
-
-  // Constructor to initialize mpz_t members
-  ratrec_data() {
-    mpz_init(mod);
-    mpz_set_ui(mod, 0);
-    mpz_init(N);
-    mpz_set_ui(N, 0);
-    mpz_init(r0);
-    mpz_set_ui(r0, 0);
-    mpz_init(r1);
-    mpz_set_ui(r1, 0);
-    mpz_init(t0);
-    mpz_set_ui(t0, 0);
-    mpz_init(t1);
-    mpz_set_ui(t1, 0);
-    mpz_init(q);
-    mpz_set_ui(q, 0);
-    mpz_init(tmp);
-    mpz_set_ui(tmp, 0);
-    mpz_init(n);
-    mpz_set_ui(n, 0);
-    mpz_init(d);
-    mpz_set_ui(d, 0);
-  }
-
-  // Destructor to clear mpz_t members
-  ~ratrec_data() {
-    mpz_clear(mod);
-    mpz_clear(N);
-    mpz_clear(r0);
-    mpz_clear(r1);
-    mpz_clear(t0);
-    mpz_clear(t1);
-    mpz_clear(q);
-    mpz_clear(tmp);
-    mpz_clear(n);
-    mpz_clear(d);
-  }
-};
-//------------------------------------------------------------------------------
-
-inline bool
-ratrecon(fmpz_t num, fmpz_t den, mpz_t u, ratrec_data* data) {
-  bool success = false;
-
-  while(mpz_cmp_ui(u, 0) < 0) {
-    mpz_add(u, u, data->mod);
-  }
-
-  mpz_set(data->r0, data->mod);
-  mpz_set_ui(data->t0, 0);
-
-  mpz_set(data->r1, u);
-  mpz_set_ui(data->t1, 1);
-
-  while(mpz_cmp(data->r1, data->N) > 0) {
-
-    mpz_fdiv_q(data->q, data->r0, data->r1);
-
-    mpz_mul(data->tmp, data->q, data->r1);
-    mpz_sub(data->tmp, data->r0, data->tmp);
-    mpz_swap(data->r0, data->r1);
-    mpz_swap(data->r1, data->tmp);
-
-    mpz_mul(data->tmp, data->q, data->t1);
-    mpz_sub(data->tmp, data->t0, data->tmp);
-    mpz_swap(data->t0, data->t1);
-    mpz_swap(data->t1, data->tmp);
-  }
-  mpz_set(data->n, data->r1);
-  mpz_set(data->d, data->t1);
-
-  if(mpz_sgn(data->d) < 0) {
-    mpz_neg(data->n, data->n);
-    mpz_neg(data->d, data->d);
-  }
-  mpz_gcd(data->q, data->n, data->d);
-  if(mpz_cmp(data->d, data->N) <= 0 && mpz_cmp_ui(data->q, 1) == 0) {
-    success = true;
-    fmpz_set_mpz(num, data->n);
-    fmpz_set_mpz(den, data->d);
-
-  } else if(verbose > 2) {
-    msg("Rational reconstruction does not exist");
-  }
-
-  return success;
-}
-//------------------------------------------------------------------------------
-
+/// Recovers each entry as a fraction with numerator and denominator below
+/// sqrt(prod/2), the bound that makes the result unique. Fails as soon as one
+/// entry has no such representation, which means more primes are needed.
 static inline bool
 rational_reconstruction(fmpz*& nums,
                         fmpz*& denoms,
                         fmpz* crt_entries,
                         coeff& prod,
                         size_t N) {
-
-  ratrec_data data;
-  fmpz_get_mpz(data.mod, prod.value);
-  // N = floor(sqrt(m/2))
-  mpz_fdiv_q_2exp(data.N, data.mod, 1);
-  mpz_sqrt(data.N, data.N);
 
   nums = new fmpz[N];
   denoms = new fmpz[N];
@@ -479,17 +429,19 @@ rational_reconstruction(fmpz*& nums,
   }
 
   bool res = true;
-  mpz_t u;
-  mpz_init(u);
+  fmpq_t q;
+  fmpq_init(q);
   for(size_t i = 0; i < N; i++) {
-    fmpz_get_mpz(u, crt_entries + i);
-    bool success = ratrecon(nums + i, denoms + i, u, &data);
-    if(!success) {
+    if(!fmpq_reconstruct_fmpz(q, crt_entries + i, prod.value)) {
+      if(verbose > 2)
+        msg("Rational reconstruction does not exist");
       res = false;
       break;
     }
+    fmpz_set(nums + i, fmpq_numref(q));
+    fmpz_set(denoms + i, fmpq_denref(q));
   }
-  mpz_clear(u);
+  fmpq_clear(q);
   return res;
 }
 //------------------------------------------------------------------------------
@@ -538,14 +490,75 @@ clear_denoms(std::vector<std::pair<size_t, size_t>>& idxs,
 }
 //------------------------------------------------------------------------------
 
+/// Reduces v modulo the Mersenne prime 2^31-1 without dividing: algorithm 4 of
+/// https://arxiv.org/pdf/2008.08654, with b = 31. Valid for v below 2^62, which
+/// the elimination asserts before calling.
+[[nodiscard]] static constexpr inline int64_t
+mersenne_mod(int64_t v) noexcept {
+  const int64_t v_prime = v + 1;
+  const int64_t z = ((v_prime >> 31) + v_prime) >> 31;
+  return (v + z) & 2'147'483'647;// 2^31-1
+}
+//------------------------------------------------------------------------------
+
+/// Finding the next nonzero of the dense accumulator means walking it column by
+/// column, 8 bytes at a time, over ground the row itself never touches. So
+/// every write also sets a bit in a mask, one bit per column, and a word of
+/// that mask reading zero lets the walk jump over 64 columns at once.
+///
+/// The mask is not free: every accumulator update sets its bit, so a row pays
+/// in proportion to the elimination work and is repaid in proportion to the
+/// columns skipped. That is overwhelmingly worth it where the accumulator is
+/// large and stays sparse -- lascala_neuh-13 (682903 columns) and
+/// malle_G12h-100 run 4-5x faster, 4nilp5s-10 twice as fast. It is not
+/// universal: braidXY-12 does enough arithmetic per row that the marks cost
+/// more than the scan saves, and pays about 12% for it. Attempts to pick per
+/// row from measured density did not separate the two cases, so the mask is
+/// unconditional.
+///
+/// Marks are conservative: an entry can become zero again after a subtraction,
+/// so a mark means "maybe nonzero". The invariant that matters is the other
+/// direction -- a nonzero column is always marked -- plus leaving both mask and
+/// accumulator clean for the next row.
+static inline void
+mark(uint64_t* mask, uint32_t i) {
+  mask[i >> 6] |= uint64_t(1) << (i & 63);
+}
+
+static inline void
+unmark(uint64_t* mask, uint32_t i) {
+  mask[i >> 6] &= ~(uint64_t(1) << (i & 63));
+}
+
+/// First marked column at or after `i`, or `limit + 1` if there is none.
+static inline uint32_t
+next_marked(const uint64_t* mask, uint32_t i, uint32_t limit) {
+  uint32_t w = i >> 6;
+  const uint32_t last_w = limit >> 6;
+  uint64_t bits = mask[w] & (~uint64_t(0) << (i & 63));
+
+  while(!bits) {
+    if(++w > last_w)
+      return limit + 1;
+    bits = mask[w];
+  }
+
+  uint32_t found = (w << 6) + static_cast<uint32_t>(__builtin_ctzll(bits));
+  return found > limit ? limit + 1 : found;
+}
+//------------------------------------------------------------------------------
+
 template<typename T>
-static void inline copy_to_buffer(T& buffer, uint32_vec_t vec) {
-  for(size_t i = 0; i < vec->nnz; i++)
+static void inline copy_to_buffer(T& buffer, uint64_t* mask, uint32_vec_t vec) {
+  for(size_t i = 0; i < vec->nnz; i++) {
     buffer[vec->indices[i]] = vec->entries[i];
+    mark(mask, vec->indices[i]);
+  }
 }
 //------------------------------------------------------------------------------
 
 static void inline copy_from_buffer_and_clear(int64_t* buffer,
+                                              uint64_t* mask,
                                               std::vector<uint32_t>& buffer_ids,
                                               uint32_vec_t vec) {
   size_t nnz = buffer_ids.size();
@@ -559,6 +572,7 @@ static void inline copy_from_buffer_and_clear(int64_t* buffer,
     assert(buffer[i] != 0);
     vec->entries[j++] = static_cast<uint32_t>(buffer[i]);
     buffer[i] = 0;
+    unmark(mask, static_cast<uint32_t>(i));
   }
 }
 //------------------------------------------------------------------------------
@@ -578,6 +592,7 @@ static void inline normalize_row(uint32_vec_t vec, nmod_t mod) {
 // because that will be zero anyway
 static inline void
 xmay(int64_t* __restrict x,
+     uint64_t* __restrict mask,
      int64_t a,
      const uint32_t* __restrict idx,
      const uint32_t* __restrict val,
@@ -609,6 +624,19 @@ xmay(int64_t* __restrict x,
     x[j1] = t1;
     x[j2] = t2;
     x[j3] = t3;
+
+    // one read-modify-write instead of four dependent ones, whenever the four
+    // columns land in the same mask word
+    if((j0 >> 6) == (j3 >> 6)) {
+      mask[j0 >> 6] |= (uint64_t(1) << (j0 & 63)) | (uint64_t(1) << (j1 & 63))
+                       | (uint64_t(1) << (j2 & 63))
+                       | (uint64_t(1) << (j3 & 63));
+    } else {
+      mark(mask, j0);
+      mark(mask, j1);
+      mark(mask, j2);
+      mark(mask, j3);
+    }
   }
 
   // Handle remaining elements
@@ -617,6 +645,7 @@ xmay(int64_t* __restrict x,
     int64_t t = x[j] - a * val[i];
     t += (t >> 63) & p2;
     x[j] = t;
+    mark(mask, j);
   }
 }
 //------------------------------------------------------------------------------
@@ -629,8 +658,10 @@ reverse_solve(uint32_mat_t mat, nmod_t mod) {
 
   std::vector<int32_t> piv_array(mat->ncol, -1);
   std::vector<int64_t> buffer(mat->ncol, 0);
+  std::vector<uint64_t> buffer_mask(mat->ncol / 64 + 1, 0);
   std::vector<uint32_t> buffer_ids;
   int64_t* buff = buffer.data();
+  uint64_t* mask = buffer_mask.data();
   buffer_ids.reserve(32);
 
   // sort rows by first index and nnz
@@ -661,49 +692,72 @@ reverse_solve(uint32_mat_t mat, nmod_t mod) {
     if(row->nnz < 2)
       continue;
 
-    copy_to_buffer(buff, row);
+    copy_to_buffer(buff, mask, row);
     buffer_ids.clear();
+    // the leading entry is already normalized, the scan starts after it
     buffer_ids.push_back(row->indices[0]);
     int64_t cc;
     int32_t rr;
     uint32_t i = row->indices[1];
-    while(i < mat->ncol) {
-#ifdef F4NCGB_FAST_MERSENNE_PRIME_MODULO
-      if constexpr(mersenne) {
+    uint32_t max_col = row->indices[row->nnz - 1];
+    while(true) {
+      i = next_marked(mask, i, max_col);
+      if(i > max_col)
+        break;
+
+      // the mark may be stale
+      if(buff[i] == 0) {
+        unmark(mask, i);
+        i++;
+        continue;
+      }
+
+      if constexpr(mersenne)
         cc = mersenne_mod(buff[i]);
-      } else {
-#endif
+      else
         cc = (int64_t)(((uint64_t)buff[i]) % p);
-#ifdef F4NCGB_FAST_MERSENNE_PRIME_MODULO
-      }
-#endif
       buff[i] = cc;
-      if(cc != 0) {
-        rr = piv_array[i];
-        if(rr < 0) {
-          buffer_ids.push_back(i);
-        } else {
-          assert(sparse_mat_row(mat, rr)->indices[0] == i);
-          assert(sparse_mat_row(mat, rr)->entries[0] == 1);
-          buff[i] = 0;
-          auto row_rr = sparse_mat_row(mat, rr);
-          xmay(buff, cc, row_rr->indices, row_rr->entries, row_rr->nnz, p2);
-        }
+      if(cc == 0) {
+        unmark(mask, i);
+        i++;
+        continue;
       }
-      for(i++; i < mat->ncol; i++)
-        if(buff[i] != 0)
-          break;
+
+      rr = piv_array[i];
+      if(rr < 0) {
+        buffer_ids.push_back(i);
+      } else {
+        assert(sparse_mat_row(mat, rr)->indices[0] == i);
+        assert(sparse_mat_row(mat, rr)->entries[0] == 1);
+        buff[i] = 0;
+        unmark(mask, i);
+        auto row_rr = sparse_mat_row(mat, rr);
+        max_col = std::max(max_col, row_rr->indices[row_rr->nnz - 1]);
+        xmay(buff, mask, cc, row_rr->indices, row_rr->entries, row_rr->nnz, p2);
+      }
+      i++;
     }
-    copy_from_buffer_and_clear(buff, buffer_ids, row);
+    copy_from_buffer_and_clear(buff, mask, buffer_ids, row);
   }
 
   return piv;
 }
+
 //------------------------------------------------------------------------------
+
+/// Picks the Mersenne specialisation of the elimination when the prime allows.
+static pivots
+gauss_elim_dispatch(la_context& la,
+                    const solve_state& state,
+                    uint32_mat_t mat,
+                    nmod_t mod,
+                    std::unique_ptr<BS::thread_pool<BS::none>>& pool);
 
 template<bool mersenne = false>
 pivots
-gauss_elim(uint32_mat_t mat,
+gauss_elim(la_context& la,
+           const solve_state& state,
+           uint32_mat_t mat,
            nmod_t mod,
            std::unique_ptr<BS::thread_pool<BS::none>>& pool) {
 
@@ -711,17 +765,18 @@ gauss_elim(uint32_mat_t mat,
   int64_t p2 = static_cast<int64_t>(p * p);
 
   thread_local std::vector<int64_t> buffer_local;
+  thread_local std::vector<uint64_t> buffer_mask_local;
   thread_local std::vector<uint32_t> buffer_ids_local;
 
   std::vector<std::atomic_int32_t> atomic_pivots(mat->ncol);
   std::fill(atomic_pivots.begin(), atomic_pivots.end(), -1);
 
   for(size_t r = 0; r < mat->nrow; r++) {
-    if(red_mat->trace[r])
+    if(la.red_mat->trace[r])
       continue;
 
     // reduce row with all already known pivots
-    auto task = [r, &mat, &atomic_pivots, p, p2, &mod]() {
+    auto task = [r, &la, &state, &mat, &atomic_pivots, p, p2, &mod]() {
       F4NCGB_TIME(elim_task_cpu);
       auto row = sparse_mat_row(mat, r);
       int32_t rr;
@@ -732,44 +787,53 @@ gauss_elim(uint32_mat_t mat,
       uint32_t nnz;
 
       buffer_local.resize(mat->ncol, 0);
+      buffer_mask_local.resize(mat->ncol / 64 + 1, 0);
       int64_t* buff = buffer_local.data();
+      uint64_t* mask = buffer_mask_local.data();
 
       do {
-        copy_to_buffer(buff, row);
+        copy_to_buffer(buff, mask, row);
         buffer_ids_local.clear();
         uint32_t i = row->indices[0];
         uint32_t max_col = row->indices[row->nnz - 1];
-        while(i <= max_col) {
+        while(true) {
           // find next nonzero entry
-          for(; i <= max_col; i++)
-            if(buff[i] != 0)
-              break;
+          i = next_marked(mask, i, max_col);
           if(i > max_col)
             break;
+
+          // the mark may be stale
+          if(buff[i] == 0) {
+            unmark(mask, i);
+            i++;
+            continue;
+          }
 
           assert(buff[i] > 0);
           // v must be smaller than 2^2b, i.e. 2^62
           assert(buff[i] < 4611686018427387904);
-#ifdef F4NCGB_FAST_MERSENNE_PRIME_MODULO
           if constexpr(mersenne) {
             (void)p;// p is not used in this case.
             cc = mersenne_mod(buff[i]);
           } else
-#endif
             cc = (int64_t)(((uint64_t)buff[i]) % p);
           buff[i] = cc;
-          if(cc == 0)
+          if(cc == 0) {
+            unmark(mask, i);
+            i++;
             continue;
+          }
 
           // first check red pivots
-          rr = red_pivots[i];
+          rr = la.red_pivots[i];
           if(rr >= 0) {
             buff[i] = 0;
-            indices = red_mat_indices(red_mat, rr);
-            entries = red_mat_entries(red_mat, rr);
-            nnz = red_mat_nnz(red_mat, rr);
+            unmark(mask, i);
+            indices = red_mat_indices(la.red_mat, rr);
+            entries = red_mat_entries(la.red_mat, rr);
+            nnz = red_mat_nnz(la.red_mat, rr);
             max_col = std::max(max_col, indices[nnz - 1]);
-            xmay(buff, cc, indices, entries, nnz, p2);
+            xmay(buff, mask, cc, indices, entries, nnz, p2);
             i++;
             continue;
           }
@@ -778,12 +842,13 @@ gauss_elim(uint32_mat_t mat,
           rr = atomic_pivots[i];
           if(rr >= 0) {
             buff[i] = 0;
+            unmark(mask, i);
             auto row = sparse_mat_row(mat, rr);
             indices = row->indices;
             entries = row->entries;
             nnz = row->nnz;
             max_col = std::max(max_col, indices[nnz - 1]);
-            xmay(buff, cc, indices, entries, nnz, p2);
+            xmay(buff, mask, cc, indices, entries, nnz, p2);
             i++;
             continue;
           }
@@ -795,15 +860,17 @@ gauss_elim(uint32_mat_t mat,
 
         // we have a zero row
         if(buffer_ids_local.empty()
-           or (proof_level > 0
-               and buffer_ids_local[0] >= mat->ncol - nrows_total)) {
+           or (state.proof_level > 0
+               and buffer_ids_local[0] >= mat->ncol - la.nrows_total)) {
           sparse_vec_clear(row);
-          for(const auto id : buffer_ids_local)
+          for(const auto id : buffer_ids_local) {
             buff[id] = 0;
-          red_mat->trace[r] = use_trace;// only set them if we use tracer
+            unmark(mask, id);
+          }
+          la.red_mat->trace[r] = la.use_trace;// only set if we use the tracer
           return;
         }
-        copy_from_buffer_and_clear(buff, buffer_ids_local, row);
+        copy_from_buffer_and_clear(buff, mask, buffer_ids_local, row);
         normalize_row(row, mod);
         expected = -1;
       } while(!atomic_pivots[row->indices[0]].compare_exchange_weak(
@@ -823,21 +890,35 @@ gauss_elim(uint32_mat_t mat,
     return reverse_solve<false>(mat, mod);
   }
 }
+
+//------------------------------------------------------------------------------
+
+static pivots
+gauss_elim_dispatch(la_context& la,
+                    const solve_state& state,
+                    uint32_mat_t mat,
+                    nmod_t mod,
+                    std::unique_ptr<BS::thread_pool<BS::none>>& pool) {
+  if(mod.n == PRIMES[0])
+    return gauss_elim<true>(la, state, mat, mod, pool);
+  return gauss_elim<false>(la, state, mat, mod, pool);
+}
 //------------------------------------------------------------------------------
 
 std::pair<std::vector<std::pair<size_t, size_t>>, fmpz*>
-multimodular_gauss_elim(std::vector<std::vector<size_t>>& idxs_spol,
+multimodular_gauss_elim(la_context& la,
+                        const solve_state& state,
+                        const csr_indices& idxs_spol,
                         std::vector<std::span<coeff>>& entries_spol,
                         std::vector<std::span<coeff>>& entries_red,
                         std::unique_ptr<BS::thread_pool<BS::none>>& pool) {
 
+  // Every rref held here was computed with the best pivot set seen so far; the
+  // moment a prime reveals a better one the rest are thrown away, see below.
   std::vector<std::unique_ptr<sparse_mat_struct<uint32_t>>> rrefs;
-  pivots best_piv;
-  std::vector<pivots> pivs;
   std::vector<uint32_t> used_primes;
-  std::vector<sparse_mat_struct<uint32_t>*> good_rrefs;
-  std::vector<pivots> good_pivs;
-  std::vector<uint32_t> good_primes;
+  std::vector<sparse_mat_struct<uint32_t>*> rref_ptrs;
+  pivots best_piv;
 
   std::vector<std::pair<size_t, size_t>> idxs;
   fmpz* nums = nullptr;
@@ -845,13 +926,12 @@ multimodular_gauss_elim(std::vector<std::vector<size_t>>& idxs_spol,
 
   size_t i = 0;
 
-  coeff h = height(entries_spol, entries_red);
+  coeff h = height(la, entries_spol, entries_red);
   coeff prod(1L);
-  coeff M = 10000000UL * nr_cols * (h + 100) * h + 1;
+  coeff M = 10000000UL * state.nr_cols * (h + 100) * h + 1;
 
   uint32_t p = PRIMES[0];
   nmod_t mod;
-  bool res;
 
   while(true) {
     while(prod < M) {
@@ -863,54 +943,53 @@ multimodular_gauss_elim(std::vector<std::vector<size_t>>& idxs_spol,
       if(verbose > 2)
         msg("Computing mod %lu", p);
 
-      // set up the matrices
-      res = fill_reducer_mat(entries_red, mod);
+      // a pivot would be set to zero -- move on before allocating anything
+      if(!fill_reducer_mat(la, state, entries_red, mod)
+         or !spol_pivots_survive(la, entries_spol, mod)) {
+        if(verbose > 2)
+          msg("Excluding prime %lu (bad pivots)", p);
+        continue;
+      }
+
       std::unique_ptr<sparse_mat_struct<uint32_t>> nmod_mat
         = std::make_unique<sparse_mat_struct<uint32_t>>();
-      res &= set_up_spol_matrix(nmod_mat.get(), mod, idxs_spol, entries_spol);
+      set_up_spol_matrix(
+        la, state, nmod_mat.get(), mod, idxs_spol, entries_spol);
 
-      // a pivot was set to zero -- we don't want that
-      if(!res) {
+      F4NCGB_TIME(rref);
+      pivots piv(gauss_elim_dispatch(la, state, nmod_mat.get(), mod, pool));
+
+      const int rank = cmp_pivots(best_piv, piv);
+
+      if(rank > 0) {
         if(verbose > 2)
           msg("Excluding prime %lu (bad pivots)", p);
         sparse_mat_clear(nmod_mat.get());
         continue;
       }
 
-      F4NCGB_TIME(rref);
-      auto gauss_elim_wrapper = [&]() -> pivots {
-        if(mod.n == PRIMES[0]) {
-          return gauss_elim<true>(nmod_mat.get(), mod, pool);
-        } else {
-          return gauss_elim<false>(nmod_mat.get(), mod, pool);
-        }
-      };
-      pivots piv(gauss_elim_wrapper());
+      if(rank < 0) {
+        // This prime found more pivots than every earlier one, so those were
+        // computed at a rank the true result does not have. Their primes have
+        // to leave the modulus with them: counting them would let the loop
+        // below stop gathering while there is still too little to reconstruct
+        // from.
+        for(const auto& stale : rrefs)
+          sparse_mat_clear(stale.get());
+        rrefs.clear();
+        used_primes.clear();
+        prod = 1;
+      }
 
-      if(cmp_pivots(best_piv, piv) <= 0) {
-        best_piv = piv;
-        pivs.push_back(piv);
-        rrefs.push_back(std::move(nmod_mat));
-        used_primes.push_back(p);
-        prod = prod * p;
-      } else {
-        if(verbose > 2)
-          msg("Excluding prime %lu (bad pivots)", p);
-        sparse_mat_clear(nmod_mat.get());
-      }
+      best_piv = piv;
+      rrefs.push_back(std::move(nmod_mat));
+      used_primes.push_back(p);
+      prod = prod * p;
     }
-    prod = 1;
-    good_primes.clear();
-    good_rrefs.clear();
-    good_pivs.clear();
-    for(size_t r = 0; r < rrefs.size(); r++) {
-      if(cmp_pivots(best_piv, pivs[r]) <= 0) {
-        good_primes.push_back(used_primes[r]);
-        good_rrefs.push_back(rrefs[r].get());
-        good_pivs.push_back(pivs[r]);
-        prod = prod * used_primes[r];
-      }
-    }
+
+    rref_ptrs.clear();
+    for(const auto& rref : rrefs)
+      rref_ptrs.push_back(rref.get());
     // Initialize crt_entries in reconstruction
     // and clear here
     fmpz* crt_entries = nullptr;
@@ -918,7 +997,7 @@ multimodular_gauss_elim(std::vector<std::vector<size_t>>& idxs_spol,
     {
       F4NCGB_TIME(crt);
       crt_reconstruction(
-        crt_entries, idxs, good_rrefs, good_primes, best_piv.size());
+        crt_entries, idxs, rref_ptrs, used_primes, best_piv.size());
     }
 
     bool success;
@@ -931,7 +1010,7 @@ multimodular_gauss_elim(std::vector<std::vector<size_t>>& idxs_spol,
     fmpz_cleanup(crt_entries, idxs.size());
 
     if(success) {
-      if(verify_result(nums, denoms, idxs.size(), h, nr_cols, prod))
+      if(verify_result(nums, denoms, idxs.size(), h, state.nr_cols, prod))
         break;
       else if(verbose > 2)
         msg("Verification has failed. Increasing bound.");
@@ -939,7 +1018,6 @@ multimodular_gauss_elim(std::vector<std::vector<size_t>>& idxs_spol,
 
     // increase bound and cleanup
     M = prod * p * p;
-    // sparse_mat_reset_trace(red_mat);
     fmpz_cleanup(nums, idxs.size());
     fmpz_cleanup(denoms, idxs.size());
   }
@@ -954,7 +1032,9 @@ multimodular_gauss_elim(std::vector<std::vector<size_t>>& idxs_spol,
 //------------------------------------------------------------------------------
 
 std::pair<std::vector<std::pair<size_t, size_t>>, fmpz*>
-nmod_gauss_elim(std::vector<std::vector<size_t>>& idxs_spol,
+nmod_gauss_elim(la_context& la,
+                const solve_state& state,
+                const csr_indices& idxs_spol,
                 std::vector<std::span<coeff>>& entries_spol,
                 std::vector<std::span<coeff>>& entries_red,
                 size_t p,
@@ -962,19 +1042,21 @@ nmod_gauss_elim(std::vector<std::vector<size_t>>& idxs_spol,
   nmod_t mod;
   nmod_init(&mod, p);
 
+  // Input coefficients are not reduced modulo the characteristic when they are
+  // parsed, so a leading coefficient divisible by p can reach us here. Unlike
+  // in the multimodular case there is no other prime to fall back on.
+  if(!fill_reducer_mat(la, state, entries_red, mod)
+     or !spol_pivots_survive(la, entries_spol, mod))
+    die(13,
+        "Leading coefficient of an input polynomial is divisible by the "
+        "characteristic %lu.",
+        p);
+
   uint32_mat_t nmod_mat;
-  set_up_spol_matrix(nmod_mat, mod, idxs_spol, entries_spol);
-  fill_reducer_mat(entries_red, mod);
+  set_up_spol_matrix(la, state, nmod_mat, mod, idxs_spol, entries_spol);
 
   F4NCGB_TIME(rref);
-  auto gauss_elim_wrapper = [&]() -> pivots {
-    if(mod.n == PRIMES[0]) {
-      return gauss_elim<true>(nmod_mat, mod, pool);
-    } else {
-      return gauss_elim<false>(nmod_mat, mod, pool);
-    }
-  };
-  pivots piv(gauss_elim_wrapper());
+  pivots piv(gauss_elim_dispatch(la, state, nmod_mat, mod, pool));
 
   // compute nonzero indices & entries
   size_t nnz = sparse_mat_nnz(nmod_mat);
@@ -998,30 +1080,33 @@ nmod_gauss_elim(std::vector<std::vector<size_t>>& idxs_spol,
 //------------------------------------------------------------------------------
 
 std::pair<std::vector<std::pair<size_t, size_t>>, fmpz*>
-linear_algebra(std::vector<std::vector<size_t>>& idxs_spol,
-               std::vector<std::vector<size_t>>& idxs_red,
+linear_algebra(const solve_state& state,
+               const csr_indices& idxs_spol,
+               const csr_indices& idxs_red,
                std::vector<std::span<coeff>>& entries_spol,
                std::vector<std::span<coeff>>& entries_red,
                size_t characteristic,
                std::unique_ptr<BS::thread_pool<BS::none>>& pool,
                bool tracer) {
 
-  use_trace = tracer;
-  nrows_total = idxs_spol.size() + idxs_red.size();
+  la_context la;
+  la.use_trace = tracer;
+  la.nrows_total = idxs_spol.rows() + idxs_red.rows();
 
-  set_up_reducer_mat(idxs_red, entries_red);
-  set_reducer_pivots();
-  sparse_mat_init_trace(red_mat, idxs_spol.size());
+  set_up_reducer_mat(la, state, idxs_red, entries_red);
+  set_reducer_pivots(la);
+  sparse_mat_init_trace(la.red_mat, idxs_spol.rows());
 
   std::pair<std::vector<std::pair<size_t, size_t>>, fmpz*> res;
   if(characteristic == 0)
-    res = multimodular_gauss_elim(idxs_spol, entries_spol, entries_red, pool);
+    res = multimodular_gauss_elim(
+      la, state, idxs_spol, entries_spol, entries_red, pool);
 
   else
     res = nmod_gauss_elim(
-      idxs_spol, entries_spol, entries_red, characteristic, pool);
+      la, state, idxs_spol, entries_spol, entries_red, characteristic, pool);
 
-  sparse_mat_ro_clear(red_mat);
+  sparse_mat_ro_clear(la.red_mat);
 
   return res;
 }

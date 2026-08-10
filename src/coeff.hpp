@@ -26,6 +26,13 @@ struct coeff {
     fmpz_set(value, other.value);
   }
 
+  /// Steals the limbs instead of deep-copying them, which matters for the big
+  /// numerators that come out of rational reconstruction.
+  coeff(coeff&& other) noexcept {
+    fmpz_init(value);
+    fmpz_swap(value, other.value);
+  }
+
   coeff(long x) {
     fmpz_init(value);
     fmpz_set_si(value, x);

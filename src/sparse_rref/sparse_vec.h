@@ -29,16 +29,6 @@ s_realloc(T* s, const size_t size) {
 // Scalar basics
 
 template<typename T>
-inline T*
-binarysearch(T* begin, T* end, T val) {
-  auto ptr = std::lower_bound(begin, end, val);
-  if(ptr == end || *ptr == val)
-    return ptr;
-  else
-    return end;
-}
-
-template<typename T>
 struct sparse_vec_struct {
   uint32_t nnz = 0;
   uint32_t alloc = 0;
