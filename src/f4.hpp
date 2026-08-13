@@ -1057,25 +1057,18 @@ struct f4 {
 
   void prepare_matrix() {
 
-    {
-      F4NCGB_TIME(col_sort);
-      sort_columns();
-    }
+    sort_columns();
     state.nr_cols = columns.size();
 
     // Renumber the rows from slots to columns. One array lookup per nonzero,
     // where reading the column out of a monomial-keyed hash table used to cost
     // a probe.
-    {
-      F4NCGB_TIME(col_remap);
-      for(auto& c : idxs_spol.data)
-        c = slot_to_col[c];
-      for(auto& c : idxs_red.data)
-        c = slot_to_col[c];
-    }
+    for(auto& c : idxs_spol.data)
+      c = slot_to_col[c];
+    for(auto& c : idxs_red.data)
+      c = slot_to_col[c];
 
     // sort spolies and reducers
-    F4NCGB_TIME(row_sort);
     sort_rows(spolies, extended_spolies, idxs_spol);
     // Sorting the reducers looks skippable -- they are only ever reached
     // through red_pivots[column], so their order does not enter the result, and

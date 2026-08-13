@@ -336,49 +336,42 @@ crt_reconstruction(fmpz*& entries,
   // entries are then read off with one cursor per rref instead of a binary
   // search each.
   std::vector<std::vector<uint32_t>> nnz_pos(n_piv);
-  {
-    F4NCGB_TIME(crt_support);
-    for(size_t i = 0; i < n_piv; i++) {
-      auto& cols = nnz_pos[i];
-      const auto first = sparse_mat_row(rrefs[0], i);
+  for(size_t i = 0; i < n_piv; i++) {
+    auto& cols = nnz_pos[i];
+    const auto first = sparse_mat_row(rrefs[0], i);
 
-      // Two rrefs of the same matrix disagree about where the nonzeros are only
-      // where a prime divides an entry, which is rare. Noticing that costs one
-      // comparison per row per prime and saves sorting the same support as many
-      // times as there are primes.
-      bool same = true;
-      for(size_t k = 1; k < rrefs.size() and same; k++) {
-        const auto row = sparse_mat_row(rrefs[k], i);
-        same = row->nnz == first->nnz
-               and std::memcmp(row->indices,
-                               first->indices,
-                               first->nnz * sizeof(uint32_t))
-                     == 0;
-      }
-      if(same) {
-        cols.assign(first->indices, first->indices + first->nnz);
-        continue;
-      }
-
-      for(const auto& rref : rrefs) {
-        auto row = sparse_mat_row(rref, i);
-        // we have cleared all syzygy rows completely (also the transformation
-        // matrix) thus, any row within n_piv must have nonzer polynomial part
-        cols.insert(cols.end(), row->indices, row->indices + row->nnz);
-      }
-      std::sort(cols.begin(), cols.end());
-      cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
+    // Two rrefs of the same matrix disagree about where the nonzeros are only
+    // where a prime divides an entry, which is rare. Noticing that costs one
+    // comparison per row per prime and saves sorting the same support as many
+    // times as there are primes.
+    bool same = true;
+    for(size_t k = 1; k < rrefs.size() and same; k++) {
+      const auto row = sparse_mat_row(rrefs[k], i);
+      same
+        = row->nnz == first->nnz
+          and std::memcmp(
+                row->indices, first->indices, first->nnz * sizeof(uint32_t))
+                == 0;
     }
+    if(same) {
+      cols.assign(first->indices, first->indices + first->nnz);
+      continue;
+    }
+
+    for(const auto& rref : rrefs) {
+      auto row = sparse_mat_row(rref, i);
+      // we have cleared all syzygy rows completely (also the transformation
+      // matrix) thus, any row within n_piv must have nonzer polynomial part
+      cols.insert(cols.end(), row->indices, row->indices + row->nnz);
+    }
+    std::sort(cols.begin(), cols.end());
+    cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
   }
 
   size_t nnz = 0;
   for(const auto& cols : nnz_pos)
     nnz += cols.size();
   idxs.reserve(nnz);
-
-  F4NCGB_PROFILE(gstats.crt_rounds++);
-  F4NCGB_PROFILE(gstats.crt_prime_passes.value.fetch_add(
-    rrefs.size(), std::memory_order_relaxed));
 
   size_t len = primes.size();
   fmpz* moduli = new fmpz[len];

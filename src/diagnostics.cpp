@@ -108,9 +108,6 @@ statistics::print(size_t threads) {
   report("handling critical pairs:", s.crit_pair, total_time);
   report("symbolic preprocessing:", s.sym_pre, total_time);
   report("building the matrix:", s.matrix_setup, total_time);
-  report("  sorting columns:", s.col_sort, total_time);
-  report("  slot -> column remap:", s.col_remap, total_time);
-  report("  sorting rows:", s.row_sort, total_time);
   report("linear algebra:", s.reduction, total_time);
   report("  Gauss elimination:", s.rref, total_time);
   msg("    reduce (CPU-time):     %22.2f (%2.2f %%) /#t: %.2f (%2.2f %%)",
@@ -119,10 +116,7 @@ statistics::print(size_t threads) {
       elim_task_cpu / static_cast<double>(threads),
       percent_d(elim_task_cpu / static_cast<double>(threads), total_time));
   report("  CRT:", s.crt, total_time);
-  report("    support union:", s.crt_support, total_time);
   report("  rat. reconstruction:", s.ratrec, total_time);
-  msg("reconstruction rounds:       %22zu", size_t(s.crt_rounds));
-  msg("  primes combined per round: %22zu", size_t(s.crt_prime_passes));
   report("construct new elements:", s.new_elements, total_time);
   report("other:", s.other, total_time);
   msg("");

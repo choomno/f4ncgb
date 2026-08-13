@@ -64,17 +64,10 @@ struct accumulator {
 struct statistics {
   counter store_find_calls, store_find_hits;
 
-  /// How much of the multi-modular reconstruction is redone. A round that fails
-  /// to reconstruct is thrown away and repeated with more primes, so comparing
-  /// the prime passes against the primes the result actually needed says how
-  /// much of the CRT was spent twice.
-  counter crt_rounds, crt_prime_passes;
-
   // Times
   accumulator init, other, new_elements;
   accumulator amb, crit_pair, sym_pre, matrix_setup, reduction;
-  accumulator overlap, inclusion, crt, crt_support, ratrec, rref;
-  accumulator col_sort, col_remap, row_sort;
+  accumulator overlap, inclusion, crt, ratrec, rref;
   accumulator elim_task_cpu;
   accumulator parse;
 
