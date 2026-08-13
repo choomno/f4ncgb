@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <atomic>
 #include <boost/unordered/unordered_flat_map.hpp>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <utility>
 #include <vector>
@@ -22,8 +24,11 @@ namespace f4ncgb {
 /// Scratch state of one call to linear_algebra(), shared by its helpers and by
 /// the elimination tasks. One per call, so concurrent solves stay apart.
 struct la_context {
-  /// Reducer matrix, built once and reused for every prime.
+  /// Reducer matrix layout and column indices, built once and reused for every
+  /// prime. Its coefficients live in red_values, one array per prime that may
+  /// be in flight at the same time.
   uint32_mat_ro_t red_mat = {};
+  std::vector<std::vector<uint32_t>> red_values;
   /// Column -> reducer row that has its pivot there, -1 if there is none.
   std::vector<int32_t> red_pivots;
   /// Reducer rows share coefficient arrays. For each row, the first row using
@@ -31,16 +36,32 @@ struct la_context {
   std::vector<uint32_t> ref_row;
   size_t nrows_total = 0;
   bool use_trace = true;
+
+  /// Enough coefficient arrays for `slots` primes at once.
+  void reserve_values(size_t slots) {
+    if(red_values.size() < slots)
+      red_values.resize(slots);
+    for(auto& v : red_values)
+      v.resize(red_mat->unique_nnz);
+  }
 };
 
+//------------------------------------------------------------------------------
+
+/// `order` puts the rows in pivot order: the CSR is still in the order symbolic
+/// preprocessing discovered them, and row i here is idxs[order[i]]. Reading
+/// through it costs one indirection per row and saves permuting every nonzero,
+/// which for serre-e6-17 is a few hundred megabytes copied per iteration.
 void inline set_up_reducer_mat(la_context& la,
                                const solve_state& state,
                                const csr_indices& idxs,
+                               const std::vector<size_t>& order,
                                const std::vector<std::span<coeff>>& entries) {
   auto& red_mat = la.red_mat;
   auto& ref_row = la.ref_row;
   const size_t nrows = idxs.rows();
   size_t ncols = state.nr_cols;
+  assert(order.size() == nrows);
 
   // first pass: compute total nnz and unique_nnz, and resolve every row to the
   // first one sharing its coefficients. Hashing the pointers once here saves a
@@ -52,12 +73,13 @@ void inline set_up_reducer_mat(la_context& la,
   size_t nnz = 0;
   size_t unique_nnz = 0;
   for(size_t i = 0; i < nrows; i++) {
-    nnz += idxs[i].size();
+    const size_t len = idxs[order[i]].size();
+    nnz += len;
     auto [it, inserted]
       = first_row.try_emplace(entries[i].data(), static_cast<uint32_t>(i));
     ref_row[i] = it->second;
     if(inserted)
-      unique_nnz += idxs[i].size();
+      unique_nnz += len;
   }
 
   if(state.proof_level > 0) {
@@ -65,6 +87,12 @@ void inline set_up_reducer_mat(la_context& la,
     unique_nnz += first_row.size();
     ncols += la.nrows_total;
   }
+
+  // idx_k below ends at nnz and entry_k at unique_nnz, so checking the totals
+  // here covers every offset either of them writes.
+  check_offset(nnz, "number of nonzeros in the reducer matrix");
+  check_offset(unique_nnz, "number of stored reducer coefficients");
+  check_fits(ncols, UINT32_MAX, "width of the reducer matrix");
 
   sparse_mat_ro_init(red_mat, nrows, ncols, nnz, unique_nnz);
   double ratio = nnz > 0 ? (100. * unique_nnz) / nnz : 0;
@@ -77,22 +105,23 @@ void inline set_up_reducer_mat(la_context& la,
   size_t idx_k = 0;
   size_t entry_k = 0;
   uint32_t* indices = red_mat->indices;
-  uint32_t* index_start = red_mat->index_start;
-  uint32_t* row_start = red_mat->row_start;
+  mat_offset_t* index_start = red_mat->index_start;
+  mat_offset_t* row_start = red_mat->row_start;
   uint32_t* row_nnz = red_mat->row_nnz;
 
   for(size_t i = 0; i < nrows; i++) {
-    index_start[i] = idx_k;
-    row_nnz[i] = idxs[i].size();
+    const auto row = idxs[order[i]];
+    index_start[i] = static_cast<mat_offset_t>(idx_k);
+    row_nnz[i] = row.size();
 
     // store indices
-    for(const auto j : idxs[i])
+    for(const auto j : row)
       indices[idx_k++] = j;
 
     // store coeff offset
     if(i == ref_row[i]) {
-      row_start[i] = entry_k;
-      entry_k += idxs[i].size();
+      row_start[i] = static_cast<mat_offset_t>(entry_k);
+      entry_k += row.size();
     } else {
       row_start[i] = row_start[ref_row[i]];
     }
@@ -110,9 +139,9 @@ void inline set_up_reducer_mat(la_context& la,
 bool inline fill_reducer_mat(la_context& la,
                              const solve_state& state,
                              const std::vector<std::span<coeff>>& entries,
-                             nmod_t mod) {
+                             nmod_t mod,
+                             uint32_t* mat_entries) {
   auto& red_mat = la.red_mat;
-  uint32_t* mat_entries = red_mat->entries;
 
   // only fill entries for first occurrence of each span
   for(size_t i = 0; i < red_mat->nrow; i++) {
@@ -165,10 +194,12 @@ void inline set_reducer_pivots(la_context& la) {
 /// while sparse_mat_clear() goes on to free every one of them.
 bool inline spol_pivots_survive(const la_context& la,
                                 const std::vector<std::span<coeff>>& entries,
-                                nmod_t mod) {
+                                nmod_t mod,
+                                const unsigned char* trace) {
+  (void)la;
   for(size_t i = 0; i < entries.size(); i++) {
     // rows known to reduce to zero are never filled
-    if(la.red_mat->trace[i] or entries[i].empty())
+    if(trace[i] or entries[i].empty())
       continue;
     if(!fmpz_get_nmod(entries[i][0].value, mod))
       return false;
@@ -185,7 +216,8 @@ set_up_spol_matrix(const la_context& la,
                    uint32_mat_t mat,
                    nmod_t mod,
                    const csr_indices& idxs,
-                   const std::vector<std::span<coeff>>& entries) {
+                   const std::vector<std::span<coeff>>& entries,
+                   const unsigned char* trace) {
   const size_t nrows = idxs.rows();
 
   // ---- initialize matrix ----
@@ -204,7 +236,7 @@ set_up_spol_matrix(const la_context& la,
   uint32_t offset = state.nr_cols + la.nrows_total - nrows;
   for(size_t i = 0; i < nrows; i++) {
 
-    if(la.red_mat->trace[i]) {
+    if(trace[i]) {
       // dummy init to be safe
       sparse_mat_row_init(mat, i, 0);
       continue;
@@ -304,22 +336,49 @@ crt_reconstruction(fmpz*& entries,
   // entries are then read off with one cursor per rref instead of a binary
   // search each.
   std::vector<std::vector<uint32_t>> nnz_pos(n_piv);
-  for(size_t i = 0; i < n_piv; i++) {
-    auto& cols = nnz_pos[i];
-    for(const auto& rref : rrefs) {
-      auto row = sparse_mat_row(rref, i);
-      // we have cleared all syzygy rows completely (also the transformation
-      // matrix) thus, any row within n_piv must have nonzer polynomial part
-      cols.insert(cols.end(), row->indices, row->indices + row->nnz);
+  {
+    F4NCGB_TIME(crt_support);
+    for(size_t i = 0; i < n_piv; i++) {
+      auto& cols = nnz_pos[i];
+      const auto first = sparse_mat_row(rrefs[0], i);
+
+      // Two rrefs of the same matrix disagree about where the nonzeros are only
+      // where a prime divides an entry, which is rare. Noticing that costs one
+      // comparison per row per prime and saves sorting the same support as many
+      // times as there are primes.
+      bool same = true;
+      for(size_t k = 1; k < rrefs.size() and same; k++) {
+        const auto row = sparse_mat_row(rrefs[k], i);
+        same = row->nnz == first->nnz
+               and std::memcmp(row->indices,
+                               first->indices,
+                               first->nnz * sizeof(uint32_t))
+                     == 0;
+      }
+      if(same) {
+        cols.assign(first->indices, first->indices + first->nnz);
+        continue;
+      }
+
+      for(const auto& rref : rrefs) {
+        auto row = sparse_mat_row(rref, i);
+        // we have cleared all syzygy rows completely (also the transformation
+        // matrix) thus, any row within n_piv must have nonzer polynomial part
+        cols.insert(cols.end(), row->indices, row->indices + row->nnz);
+      }
+      std::sort(cols.begin(), cols.end());
+      cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
     }
-    std::sort(cols.begin(), cols.end());
-    cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
   }
 
   size_t nnz = 0;
   for(const auto& cols : nnz_pos)
     nnz += cols.size();
   idxs.reserve(nnz);
+
+  F4NCGB_PROFILE(gstats.crt_rounds++);
+  F4NCGB_PROFILE(gstats.crt_prime_passes.value.fetch_add(
+    rrefs.size(), std::memory_order_relaxed));
 
   size_t len = primes.size();
   fmpz* moduli = new fmpz[len];
@@ -459,12 +518,11 @@ clear_denoms(std::vector<std::pair<size_t, size_t>>& idxs,
   fmpz_init(L);
   fmpz_init(tmp);
 
-  size_t cur_row = idxs[0].first;
   size_t row_start = 0;
 
   while(row_start < idxs.size()) {
 
-    cur_row = idxs[row_start].first;
+    const size_t cur_row = idxs[row_start].first;
     fmpz_set_ui(L, 1);
 
     // find row range and compute denom-lcm
@@ -490,6 +548,8 @@ clear_denoms(std::vector<std::pair<size_t, size_t>>& idxs,
 }
 //------------------------------------------------------------------------------
 
+//------------------------------------------------------------------------------
+
 /// Reduces v modulo the Mersenne prime 2^31-1 without dividing: algorithm 4 of
 /// https://arxiv.org/pdf/2008.08654, with b = 31. Valid for v below 2^62, which
 /// the elimination asserts before calling.
@@ -499,6 +559,41 @@ mersenne_mod(int64_t v) noexcept {
   const int64_t z = ((v_prime >> 31) + v_prime) >> 31;
   return (v + z) & 2'147'483'647;// 2^31-1
 }
+
+/// Reduction modulo a fixed p by a precomputed inverse, replacing the hardware
+/// division the accumulator scan used to do per visited column.
+///
+/// With m = floor(2^64 / p), the quotient estimate is off by at most one for
+/// any v below 2^62 -- the elimination's own bound on the accumulator -- so a
+/// single conditional subtraction finishes it.
+///
+/// Reducing on every write instead, so that the accumulator is uint32_t rather
+/// than int64_t, was tried and is slower. It halves the one array the scan
+/// reads at random -- 13 MB on braid3-16, one per thread -- and removes this
+/// reduction from the scan entirely, but it costs a Shoup multiplication per
+/// nonzero in xmay() where lazy accumulation costs a multiply and a
+/// conditional add. Measured against this version: braidXY-12 15.14 s against
+/// 14.26 s and braid3-16 54.44 s against 52.71 s at -T 1, and at -T 8 the
+/// elimination 2.50 s against 2.13 s and 10.03 s against 10.28 s. So the extra
+/// arithmetic outweighs the traffic saved even where the accumulator is far
+/// past L2, and the one figure that came out ahead is inside the run-to-run
+/// spread these benchmarks have (about 3 % on braid3-16).
+struct barrett {
+  uint64_t p;
+  uint64_t m;
+
+  explicit barrett(uint64_t p_) noexcept
+    : p(p_)
+    // p is an odd prime, so it never divides 2^64 and this is floor(2^64 / p)
+    , m(~uint64_t(0) / p_) {}
+
+  [[nodiscard]] inline uint64_t operator()(uint64_t v) const noexcept {
+    const uint64_t q
+      = static_cast<uint64_t>((static_cast<__uint128_t>(v) * m) >> 64);
+    const uint64_t r = v - q * p;
+    return r >= p ? r - p : r;
+  }
+};
 //------------------------------------------------------------------------------
 
 /// Finding the next nonzero of the dense accumulator means walking it column by
@@ -520,6 +615,18 @@ mersenne_mod(int64_t v) noexcept {
 /// so a mark means "maybe nonzero". The invariant that matters is the other
 /// direction -- a nonzero column is always marked -- plus leaving both mask and
 /// accumulator clean for the next row.
+///
+/// A second level over this -- one bit per mask word, skipping 4096 columns at
+/// a time -- was tried, on the grounds that the mask is 202 KB on braid3-16
+/// (1618887 columns) and 578 KB on 4nilp5s-10 (4622141), well past L1. It lost
+/// everywhere: 10% on braid3-16, 6% on 4nilp5s-10, and 10% on braidXY-12, which
+/// at 79475 columns has a 10 KB mask and was measured with the second level
+/// switched off altogether -- so that last figure is the bookkeeping alone.
+///
+/// Two reasons. The walk the summary shortens is a sequential read that the
+/// hardware prefetcher already covers, and the upkeep (a store per mark, a
+/// branch per unmark, a test in the innermost step) lands on the hottest path
+/// there is -- including in the batched write below, which it breaks up.
 static inline void
 mark(uint64_t* mask, uint32_t i) {
   mask[i >> 6] |= uint64_t(1) << (i & 63);
@@ -590,6 +697,13 @@ static void inline normalize_row(uint32_vec_t vec, nmod_t mod) {
 // Compute x - ay mod p
 // but leave out the 0th entry of y
 // because that will be zero anyway
+//
+// Prefetching the pivot entry for each column written here was tried -- per
+// column the scan chains mask read -> accumulator read -> pivot read -> reducer
+// row read, and this would break one link of it. It cost 9% on braid3-16 and 7%
+// on 4nilp5s-10: the scan goes on to visit only the smallest of the columns a
+// row touches, so most of the prefetched lines were evicted before anything
+// asked for them.
 static inline void
 xmay(int64_t* __restrict x,
      uint64_t* __restrict mask,
@@ -656,6 +770,8 @@ reverse_solve(uint32_mat_t mat, nmod_t mod) {
   uint64_t p = mod.n;
   int64_t p2 = static_cast<int64_t>(p * p);
 
+  const barrett red(p);
+
   std::vector<int32_t> piv_array(mat->ncol, -1);
   std::vector<int64_t> buffer(mat->ncol, 0);
   std::vector<uint64_t> buffer_mask(mat->ncol / 64 + 1, 0);
@@ -715,7 +831,7 @@ reverse_solve(uint32_mat_t mat, nmod_t mod) {
       if constexpr(mersenne)
         cc = mersenne_mod(buff[i]);
       else
-        cc = (int64_t)(((uint64_t)buff[i]) % p);
+        cc = static_cast<int64_t>(red(static_cast<uint64_t>(buff[i])));
       buff[i] = cc;
       if(cc == 0) {
         unmark(mask, i);
@@ -745,13 +861,18 @@ reverse_solve(uint32_mat_t mat, nmod_t mod) {
 
 //------------------------------------------------------------------------------
 
+/// `red_values` holds the reducer coefficients for this prime and `trace` the
+/// rows already known to vanish, both supplied by the caller: several primes can
+/// be in flight at once, so neither may be read out of shared state.
 /// Picks the Mersenne specialisation of the elimination when the prime allows.
 static pivots
 gauss_elim_dispatch(la_context& la,
                     const solve_state& state,
                     uint32_mat_t mat,
                     nmod_t mod,
-                    std::unique_ptr<BS::thread_pool<BS::none>>& pool);
+                    BS::thread_pool<BS::none>* pool,
+                    const uint32_t* red_values,
+                    const unsigned char* trace);
 
 template<bool mersenne = false>
 pivots
@@ -759,31 +880,38 @@ gauss_elim(la_context& la,
            const solve_state& state,
            uint32_mat_t mat,
            nmod_t mod,
-           std::unique_ptr<BS::thread_pool<BS::none>>& pool) {
+           BS::thread_pool<BS::none>* pool,
+           const uint32_t* red_values,
+           const unsigned char* trace) {
 
   uint64_t p = mod.n;
   int64_t p2 = static_cast<int64_t>(p * p);
+  const barrett red(p);
 
   thread_local std::vector<int64_t> buffer_local;
   thread_local std::vector<uint64_t> buffer_mask_local;
   thread_local std::vector<uint32_t> buffer_ids_local;
 
   std::vector<std::atomic_int32_t> atomic_pivots(mat->ncol);
-  std::fill(atomic_pivots.begin(), atomic_pivots.end(), -1);
+  // Nothing else can see this yet -- the tasks below are detached afterwards --
+  // so plain stores do. std::fill would emit a sequentially consistent one per
+  // column, of which there are 1.6 M on the widest matrices.
+  for(auto& pivot : atomic_pivots)
+    pivot.store(-1, std::memory_order_relaxed);
 
-  for(size_t r = 0; r < mat->nrow; r++) {
-    if(la.red_mat->trace[r])
-      continue;
-
-    // reduce row with all already known pivots
-    auto task = [r, &la, &state, &mat, &atomic_pivots, p, p2, &mod]() {
+  // reduce row with all already known pivots
+  auto reduce_row
+    = [&la, &state, &mat, &atomic_pivots, p2, red, &mod, red_values, trace](
+        size_t r) {
+      if(trace[r])
+        return;
       F4NCGB_TIME(elim_task_cpu);
       auto row = sparse_mat_row(mat, r);
       int32_t rr;
       int64_t cc;
       int32_t expected = -1;
       uint32_t* indices;
-      uint32_t* entries;
+      const uint32_t* entries;
       uint32_t nnz;
 
       buffer_local.resize(mat->ncol, 0);
@@ -813,10 +941,10 @@ gauss_elim(la_context& la,
           // v must be smaller than 2^2b, i.e. 2^62
           assert(buff[i] < 4611686018427387904);
           if constexpr(mersenne) {
-            (void)p;// p is not used in this case.
+            (void)red;// the precomputed inverse is not used in this case.
             cc = mersenne_mod(buff[i]);
           } else
-            cc = (int64_t)(((uint64_t)buff[i]) % p);
+            cc = static_cast<int64_t>(red(static_cast<uint64_t>(buff[i])));
           buff[i] = cc;
           if(cc == 0) {
             unmark(mask, i);
@@ -830,7 +958,7 @@ gauss_elim(la_context& la,
             buff[i] = 0;
             unmark(mask, i);
             indices = red_mat_indices(la.red_mat, rr);
-            entries = red_mat_entries(la.red_mat, rr);
+            entries = red_mat_entries(la.red_mat, red_values, rr);
             nnz = red_mat_nnz(la.red_mat, rr);
             max_col = std::max(max_col, indices[nnz - 1]);
             xmay(buff, mask, cc, indices, entries, nnz, p2);
@@ -838,8 +966,10 @@ gauss_elim(la_context& la,
             continue;
           }
 
-          // then check atomic pivots
-          rr = atomic_pivots[i];
+          // then check atomic pivots. Acquire, to pair with the release on the
+          // compare_exchange below: seeing the pivot has to mean seeing the row
+          // the thread that claimed it wrote first.
+          rr = atomic_pivots[i].load(std::memory_order_acquire);
           if(rr >= 0) {
             buff[i] = 0;
             unmark(mask, i);
@@ -867,22 +997,50 @@ gauss_elim(la_context& la,
             buff[id] = 0;
             unmark(mask, id);
           }
-          la.red_mat->trace[r] = la.use_trace;// only set if we use the tracer
+          // Only set if we use the tracer. Relaxed: concurrent primes all
+          // store the same value here, and nobody reads it before the batch
+          // they belong to has finished.
+          if(la.use_trace)
+            __atomic_store_n(&la.red_mat->trace[r], 1, __ATOMIC_RELAXED);
           return;
         }
         copy_from_buffer_and_clear(buff, mask, buffer_ids_local, row);
         normalize_row(row, mod);
         expected = -1;
-      } while(!atomic_pivots[row->indices[0]].compare_exchange_weak(
-        expected, static_cast<int32_t>(r)));
+        // Strong, not weak: a failure here sends the row through the whole
+        // reduction again, which is the right answer when another thread really
+        // did claim the column and pure waste when the LL/SC just lost its
+        // reservation.
+      } while(!atomic_pivots[row->indices[0]].compare_exchange_strong(
+        expected,
+        static_cast<int32_t>(r),
+        std::memory_order_release,
+        std::memory_order_relaxed));
     };
-    if(pool)
-      pool->detach_task(task);
-    else
-      task();
-  }
-  if(pool)
+
+  if(pool) {
+    // Rows go out in blocks, not one task apiece. A row is often far too small
+    // to be worth a trip through the queue: lv2d10-100 hands out up to 85928 of
+    // them per prime, each carrying four nonzeros, and paid 44% for it at -T 8
+    // against -T 1. There are still dozens of blocks per thread, so the queue
+    // keeps balancing rows whose cost varies wildly, and they are handed out in
+    // row order exactly as before -- a row that waits for pivots the rows above
+    // it claim still tends to run after them.
+    const size_t rows = mat->nrow;
+    const size_t block
+      = std::max<size_t>(1, rows / (pool->get_thread_count() * 32));
+    for(size_t begin = 0; begin < rows; begin += block) {
+      const size_t end = std::min(begin + block, rows);
+      pool->detach_task([begin, end, &reduce_row]() {
+        for(size_t r = begin; r < end; r++)
+          reduce_row(r);
+      });
+    }
     pool->wait();
+  } else {
+    for(size_t r = 0; r < mat->nrow; r++)
+      reduce_row(r);
+  }
 
   if(mod.n == PRIMES[0]) {
     return reverse_solve<true>(mat, mod);
@@ -898,12 +1056,23 @@ gauss_elim_dispatch(la_context& la,
                     const solve_state& state,
                     uint32_mat_t mat,
                     nmod_t mod,
-                    std::unique_ptr<BS::thread_pool<BS::none>>& pool) {
+                    BS::thread_pool<BS::none>* pool,
+                    const uint32_t* red_values,
+                    const unsigned char* trace) {
   if(mod.n == PRIMES[0])
-    return gauss_elim<true>(la, state, mat, mod, pool);
-  return gauss_elim<false>(la, state, mat, mod, pool);
+    return gauss_elim<true>(la, state, mat, mod, pool, red_values, trace);
+  return gauss_elim<false>(la, state, mat, mod, pool, red_values, trace);
 }
 //------------------------------------------------------------------------------
+
+/// One prime's contribution to the modulus. Filled in by a batch task and read
+/// back in prime order, so which task finished first cannot change the result.
+struct prime_result {
+  uint32_t p = 0;
+  bool usable = false;
+  pivots piv;
+  std::unique_ptr<sparse_mat_struct<uint32_t>> rref;
+};
 
 std::pair<std::vector<std::pair<size_t, size_t>>, fmpz*>
 multimodular_gauss_elim(la_context& la,
@@ -930,61 +1099,149 @@ multimodular_gauss_elim(la_context& la,
   coeff prod(1L);
   coeff M = 10000000UL * state.nr_cols * (h + 100) * h + 1;
 
-  uint32_t p = PRIMES[0];
-  nmod_t mod;
+  /// Primes to gather before trying to reconstruct again. Zero while the
+  /// initial bound M is in charge; from the first failure on, this drives the
+  /// loop and grows geometrically.
+  ///
+  /// It used to grow by `M = prod * p * p`, which is exactly two more primes per
+  /// failure. Every round then re-ran the CRT over every prime gathered so far,
+  /// at a cost superlinear in their number, so braidXY-12 spent 51 rounds and
+  /// 2908 prime-passes producing a result that needs 300 -- 37% of its runtime.
+  /// Growing by half means a handful of rounds, and the last one dominates.
+  size_t target = 0;
+
+  const size_t threads = pool ? pool->get_thread_count() : 1;
+  std::vector<prime_result> batch;
+  std::vector<unsigned char> trace_snapshot;
 
   while(true) {
-    while(prod < M) {
-      if(i >= MAX_PRIMES)
+    while(prod < M or used_primes.size() < target) {
+      // How many primes are still wanted. Primes are all just under 2^31, so
+      // the shortfall in the bound converts straight into a count.
+      size_t wanted = used_primes.size() < target ? target - used_primes.size()
+                                                  : 0;
+      if(prod < M) {
+        const flint_bitcnt_t missing
+          = fmpz_bits(M.value) - std::min(fmpz_bits(M.value),
+                                          fmpz_bits(prod.value));
+        wanted = std::max<size_t>(wanted, (missing + 30) / 31);
+      }
+      wanted = std::max<size_t>(wanted, 1);
+      wanted = std::min(wanted, MAX_PRIMES - std::min(i, MAX_PRIMES));
+      if(wanted == 0)
         die(-1, "Multimodular Gaussian elimination is not converging");
-      p = PRIMES[i++];
-      nmod_init(&mod, p);
 
-      if(verbose > 2)
-        msg("Computing mod %lu", p);
+      // Reducing several primes at once beats splitting one prime's rows over
+      // the same threads only when there are enough of them to fill the pool.
+      // With two primes and eight threads a batch would leave six idle, while
+      // row-level parallelism uses all of them -- and worse, batching those two
+      // would forfeit the tracer, which is what makes every prime after the
+      // first several times cheaper than it. So the test is on what this call
+      // has shown it needs in total, not on what is left: the tail of a long
+      // run still belongs in a batch.
+      //
+      // The first prime always runs alone whatever the count. It is the one
+      // that fills in the tracer, and every prime batched beside it would do
+      // the work it is about to make unnecessary.
+      const bool many = pool and not used_primes.empty()
+                        and used_primes.size() + wanted >= threads;
+      const size_t batch_size = many ? std::min(wanted, threads) : 1;
+      const bool parallel = batch_size > 1;
 
-      // a pivot would be set to zero -- move on before allocating anything
-      if(!fill_reducer_mat(la, state, entries_red, mod)
-         or !spol_pivots_survive(la, entries_spol, mod)) {
+      batch.clear();
+      batch.resize(batch_size);
+      for(auto& r : batch) {
+        r.p = PRIMES[i++];
         if(verbose > 2)
-          msg("Excluding prime %lu (bad pivots)", p);
-        continue;
+          msg("Computing mod %lu", r.p);
       }
 
-      std::unique_ptr<sparse_mat_struct<uint32_t>> nmod_mat
-        = std::make_unique<sparse_mat_struct<uint32_t>>();
-      set_up_spol_matrix(
-        la, state, nmod_mat.get(), mod, idxs_spol, entries_spol);
+      // One trace for the whole batch. Taking a copy is what makes it safe to
+      // run several primes at once: a prime that discovers a new zero row
+      // publishes it for the next batch, but nobody may see the trace change
+      // between building its matrix and reducing it -- that would leave a row
+      // filled in and never reduced.
+      trace_snapshot.assign(la.red_mat->trace,
+                            la.red_mat->trace + la.red_mat->trace_len);
+      la.reserve_values(batch_size);
 
-      F4NCGB_TIME(rref);
-      pivots piv(gauss_elim_dispatch(la, state, nmod_mat.get(), mod, pool));
+      auto run_prime = [&](size_t slot, BS::thread_pool<BS::none>* row_pool) {
+        prime_result& r = batch[slot];
+        nmod_t m;
+        nmod_init(&m, r.p);
+        uint32_t* values = la.red_values[slot].data();
 
-      const int rank = cmp_pivots(best_piv, piv);
+        // a pivot would be set to zero -- move on before allocating anything
+        if(!fill_reducer_mat(la, state, entries_red, m, values)
+           or !spol_pivots_survive(
+             la, entries_spol, m, trace_snapshot.data()))
+          return;
 
-      if(rank > 0) {
-        if(verbose > 2)
-          msg("Excluding prime %lu (bad pivots)", p);
-        sparse_mat_clear(nmod_mat.get());
-        continue;
+        r.rref = std::make_unique<sparse_mat_struct<uint32_t>>();
+        set_up_spol_matrix(la,
+                           state,
+                           r.rref.get(),
+                           m,
+                           idxs_spol,
+                           entries_spol,
+                           trace_snapshot.data());
+        r.piv = gauss_elim_dispatch(
+          la, state, r.rref.get(), m, row_pool, values, trace_snapshot.data());
+        r.usable = true;
+      };
+
+      {
+        F4NCGB_TIME(rref);
+        if(parallel) {
+          for(size_t slot = 0; slot < batch_size; slot++)
+            pool->detach_task([&run_prime, slot]() {
+              run_prime(slot, nullptr);
+            });
+          pool->wait();
+        } else {
+          // A batch of one gets the whole pool for its rows.
+          run_prime(0, pool.get());
+        }
       }
 
-      if(rank < 0) {
-        // This prime found more pivots than every earlier one, so those were
-        // computed at a rank the true result does not have. Their primes have
-        // to leave the modulus with them: counting them would let the loop
-        // below stop gathering while there is still too little to reconstruct
-        // from.
-        for(const auto& stale : rrefs)
-          sparse_mat_clear(stale.get());
-        rrefs.clear();
-        used_primes.clear();
-        prod = 1;
-      }
+      // Consumed in prime order, never in completion order, so the batch
+      // reaches the same verdict the primes would have reached one at a time.
+      // The elimination does not depend on best_piv, so a prime computed before
+      // a better pivot set turned up is still the rref it would have been.
+      for(auto& r : batch) {
+        if(!r.usable) {
+          if(verbose > 2)
+            msg("Excluding prime %lu (bad pivots)", r.p);
+          continue;
+        }
 
-      best_piv = piv;
-      rrefs.push_back(std::move(nmod_mat));
-      used_primes.push_back(p);
-      prod = prod * p;
+        const int rank = cmp_pivots(best_piv, r.piv);
+
+        if(rank > 0) {
+          if(verbose > 2)
+            msg("Excluding prime %lu (bad pivots)", r.p);
+          sparse_mat_clear(r.rref.get());
+          continue;
+        }
+
+        if(rank < 0) {
+          // This prime found more pivots than every earlier one, so those were
+          // computed at a rank the true result does not have. Their primes have
+          // to leave the modulus with them: counting them would let the loop
+          // below stop gathering while there is still too little to reconstruct
+          // from.
+          for(const auto& stale : rrefs)
+            sparse_mat_clear(stale.get());
+          rrefs.clear();
+          used_primes.clear();
+          prod = 1;
+        }
+
+        best_piv = r.piv;
+        rrefs.push_back(std::move(r.rref));
+        used_primes.push_back(r.p);
+        prod = prod * r.p;
+      }
     }
 
     rref_ptrs.clear();
@@ -1016,8 +1273,10 @@ multimodular_gauss_elim(la_context& la,
         msg("Verification has failed. Increasing bound.");
     }
 
-    // increase bound and cleanup
-    M = prod * p * p;
+    // Half as many again, never past the primes there are: overshooting into
+    // die() would turn a run that converges into one that does not.
+    target = used_primes.size() + std::max<size_t>(2, used_primes.size() / 2);
+    target = std::min(target, MAX_PRIMES);
     fmpz_cleanup(nums, idxs.size());
     fmpz_cleanup(denoms, idxs.size());
   }
@@ -1042,21 +1301,27 @@ nmod_gauss_elim(la_context& la,
   nmod_t mod;
   nmod_init(&mod, p);
 
+  la.reserve_values(1);
+  uint32_t* values = la.red_values[0].data();
+  const unsigned char* trace = la.red_mat->trace;
+
   // Input coefficients are not reduced modulo the characteristic when they are
   // parsed, so a leading coefficient divisible by p can reach us here. Unlike
   // in the multimodular case there is no other prime to fall back on.
-  if(!fill_reducer_mat(la, state, entries_red, mod)
-     or !spol_pivots_survive(la, entries_spol, mod))
+  if(!fill_reducer_mat(la, state, entries_red, mod, values)
+     or !spol_pivots_survive(la, entries_spol, mod, trace))
     die(13,
         "Leading coefficient of an input polynomial is divisible by the "
         "characteristic %lu.",
         p);
 
   uint32_mat_t nmod_mat;
-  set_up_spol_matrix(la, state, nmod_mat, mod, idxs_spol, entries_spol);
+  set_up_spol_matrix(
+    la, state, nmod_mat, mod, idxs_spol, entries_spol, trace);
 
   F4NCGB_TIME(rref);
-  pivots piv(gauss_elim_dispatch(la, state, nmod_mat, mod, pool));
+  pivots piv(
+    gauss_elim_dispatch(la, state, nmod_mat, mod, pool.get(), values, trace));
 
   // compute nonzero indices & entries
   size_t nnz = sparse_mat_nnz(nmod_mat);
@@ -1083,6 +1348,7 @@ std::pair<std::vector<std::pair<size_t, size_t>>, fmpz*>
 linear_algebra(const solve_state& state,
                const csr_indices& idxs_spol,
                const csr_indices& idxs_red,
+               const std::vector<size_t>& red_order,
                std::vector<std::span<coeff>>& entries_spol,
                std::vector<std::span<coeff>>& entries_red,
                size_t characteristic,
@@ -1093,7 +1359,20 @@ linear_algebra(const solve_state& state,
   la.use_trace = tracer;
   la.nrows_total = idxs_spol.rows() + idxs_red.rows();
 
-  set_up_reducer_mat(la, state, idxs_red, entries_red);
+  // Both matrices carry a column per row when proofs are on -- the
+  // transformation block -- and those columns are indexed as nr_cols + row, in
+  // uint32_t like every other column index.
+  if(state.proof_level > 0)
+    check_fits(state.nr_cols + la.nrows_total,
+               UINT32_MAX,
+               "width of the matrix with its transformation block");
+
+  // red_pivots and atomic_pivots hold a row per column as an int32_t, with -1
+  // for "no pivot here".
+  check_fits(idxs_red.rows(), INT32_MAX, "number of reducer rows");
+  check_fits(idxs_spol.rows(), INT32_MAX, "number of s-polynomial rows");
+
+  set_up_reducer_mat(la, state, idxs_red, red_order, entries_red);
   set_reducer_pivots(la);
   sparse_mat_init_trace(la.red_mat, idxs_spol.rows());
 

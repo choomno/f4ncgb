@@ -1,6 +1,9 @@
+#include <cstdio>
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <stdexcept>
+#include <tuple>
 
 #include "f4ncgb.hpp"
 #include "fuzztest/fuzztest.h"

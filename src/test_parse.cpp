@@ -43,7 +43,8 @@ invoke_parser(parser_context& ctx,
   if(err)
     return err;
   std::vector<coeff> input_denoms;
-  return parse_rest_into_polynomial_store(ctx, ps, input_denoms);
+  return parse_rest_into_polynomial_store(
+    ctx, ps, input_denoms, opts.num_vars);
 }
 
 BOOST_AUTO_TEST_CASE(parse_files) {

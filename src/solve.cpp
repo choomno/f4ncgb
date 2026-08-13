@@ -1,6 +1,7 @@
 #include "solve.hpp"
 
 #include <filesystem>
+#include <sstream>
 
 #include <boost/mp11/algorithm.hpp>
 
@@ -97,9 +98,11 @@ struct f4_wrapper : f4_base {
       msg("Max. Iterations:   %lu", opts.maxiter);
       msg("Max. amb. degree:  %lu", opts.maxdeg);
     }
-    msg(mon_order.str().c_str());
+    // "%s", not the string itself: a variable name or an output path may
+    // contain a '%', which as a format would read an argument that is not there
+    msg("%s", mon_order.str().c_str());
     msg("Nr. threads:       %lu", opts.threads);
-    msg(out_name.c_str());
+    msg("%s", out_name.c_str());
     if(!opts.reduce)
       msg("Proof logging:     %s", proof_str.c_str());
     msg("Tracer:            %s", opts.tracer ? "on" : "off");

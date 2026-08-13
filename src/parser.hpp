@@ -4,6 +4,7 @@
 #include "options.hpp"
 #include "polynomial_store.hpp"
 
+#include <cstdio>
 #include <filesystem>
 #include <format>
 #include <limits>
@@ -74,6 +75,12 @@ class parser_context {
                         void* add_cb_userdata,
                         parse_monomial_boundary_cb boundary_cb,
                         void* boundary_cb_userdata);
+
+  /// Reads the variable blocks that follow the header line of the poly and
+  /// sympoly formats. Part of the header rather than of the body, because the
+  /// monomial order is built out of the blocks and the body is sorted by it.
+  template<parser_symbolic_context::id (*getV)(parser_context&)>
+  parse_res read_blocks();
 
   template<parser_symbolic_context::id (*getV)(parser_context&)>
   parse_res impl_poly_gen(parse_add_cb add_cb,
@@ -289,11 +296,16 @@ parse(parser_context& ctx,
 }
 
 /// Appends the denominator cleared out of each polynomial to `input_denoms`.
+///
+/// Every route into the stores runs through here -- the three input formats and
+/// the C API, which replays what it was handed through the same callbacks -- so
+/// this is where a variable index is checked against the declared range.
 template<class PS>
 parse_res
 parse_rest_into_polynomial_store(parser_context& ctx,
                                  PS& s,
-                                 std::vector<coeff>& input_denoms) {
+                                 std::vector<coeff>& input_denoms,
+                                 size_t num_vars) {
 
   using monomial_store = PS::monomial_store_;
   using monomial_ref = PS::value_type;
@@ -302,10 +314,22 @@ parse_rest_into_polynomial_store(parser_context& ctx,
   std::vector<std::pair<coeff, monomial_ref>> tmp_polynomial;
   std::vector<long> tmp_denom;
 
-  auto add_cb = [&s, &input_denoms, &tmp_monomial, &tmp_polynomial, &tmp_denom](
-                  uint32_t id) {
+  auto add_cb
+    = [&s, &input_denoms, &tmp_monomial, &tmp_polynomial, &tmp_denom, num_vars](
+        uint32_t id) -> parse_res {
     if(id) {
-      tmp_monomial.push_back(id);
+      // Variables are numbered 1..num_vars, and an index is used directly as an
+      // edge of the monomial tries and as a value within a monomial. Both are
+      // sized for exactly that range, so an index from outside it reads and
+      // writes past the end of them, and nothing downstream looks at it again.
+      // The width of `var` is chosen from num_vars in f4ncgb_main(), so this
+      // one bound also covers the narrowing on the next line.
+      if(id > num_vars)
+        return std::format("variable index {} is out of range, the problem "
+                           "declares {} variables",
+                           id,
+                           num_vars);
+      tmp_monomial.push_back(static_cast<var>(id));
     } else {
 
       coeff common_denom = 1;

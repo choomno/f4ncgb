@@ -7,6 +7,9 @@
 #pragma GCC diagnostic ignored "-Walloc-size"
 #endif
 
+#include <cassert>
+#include <tuple>
+
 #include "coeff.hpp"
 #include "monomial_store.hpp"
 #include "store.hpp"
@@ -67,6 +70,9 @@ class polynomial_store
     : base::store()
     , store_(store) {
     cpool_.reset(allocate_pool(capacity(), cpool_capacity_));
+    // allocate_pool() rounds up to whole huge pages, so never let the bound
+    // reach past what an id of type I can index.
+    cpool_capacity_ = std::min(cpool_capacity_, capacity());
   }
 
   ~polynomial_store() {
@@ -157,24 +163,40 @@ class polynomial_store
     return m.idx;
   }
 
-  template<bool front, bool back>
-  inline I multiply_front_or_back_or_both(I f, I p, I b) {
+  private:
+  /// f * p * b, as a new polynomial sharing p's coefficient array: only the
+  /// monomials are built. A factor of 1 is passed as id 0, the empty monomial,
+  /// so one-sided products go through here too.
+  ///
+  /// The result is scratch -- real_size_ and cpool_size_ are rolled back -- so
+  /// it lives only until the next reset().
+  template<bool have_lm>
+  inline I multiply(I f, I p, I b, I known_lm) {
     assert(p != 0);
 
     size_t cpool_size_old = cpool_size_;
     size_t size_old = this->real_size_;
     metadata& p_metadata = this->get_metadata(p);
-    auto [new_m, new_i, new_c] = add(p_metadata.length);
-    new_m.length = p_metadata.length;
-    for(I i = 0; i < p_metadata.length; ++i) {
-      if constexpr(front && !back) {
-        new_i[i] = store_.get_product_id(f, (*this)[p][i]);
-      } else if constexpr(!front && back) {
-        new_i[i] = store_.get_product_id((*this)[p][i], b);
-      } else if constexpr(front && back) {
-        new_i[i] = store_.get_product_id(f, (*this)[p][i], b);
-      }
+    const I length = p_metadata.length;
+    auto [new_m, new_i, new_c] = add(length);
+    new_m.length = length;
+
+    const std::span<const I> p_mons = (*this)[p];
+
+    // f and b are the same for every term, so their values are looked up once
+    // here rather than once per term inside get_product_id().
+    const auto f_v = store_[f];
+    const auto b_v = store_[b];
+
+    I i = 0;
+    if constexpr(have_lm) {
+      assert(length > 0);
+      new_i[0] = known_lm;
+      i = 1;
     }
+    for(; i < length; ++i)
+      new_i[i] = store_.get_product_id(f_v, p_mons[i], b_v);
+
     I g = commit();
     this->get_metadata(g).coefficients = p_metadata.coefficients;
     cpool_size_ = cpool_size_old;
@@ -182,14 +204,17 @@ class polynomial_store
     return g;
   }
 
-  inline I multiply_front(I m, I p) {
-    return multiply_front_or_back_or_both<true, false>(m, p, 0);
-  }
-  inline I multiply_back(I p, I m) {
-    return multiply_front_or_back_or_both<false, true>(0, p, m);
-  }
+  public:
   inline I multiply_front_and_back(I f, I p, I b) {
-    return multiply_front_or_back_or_both<true, true>(f, p, b);
+    return multiply<false>(f, p, b, 0);
+  }
+  /// Same product, with the leading monomial handed in rather than looked up.
+  /// Both callers pick p precisely because they already hold f * lm(p) * b, so
+  /// interning it again is a probe into the largest hash table in the program
+  /// that can only return the id the caller started from. It is a lookup that
+  /// always hits, never an insertion, so ids are assigned exactly as before.
+  inline I multiply_front_and_back(I f, I p, I b, I known_lm) {
+    return multiply<true>(f, p, b, known_lm);
   }
 
   const monomial_store_& get_monomial_store() const { return store_; }

@@ -15,6 +15,7 @@ option(ENABLE_STORE_DUMP "Enable a (very expensive) dump when deconstructing a s
 option(ENABLE_NATIVE "Enable -march=native to target the host CPU (creates non-portable binaries)" ON)
 option(ENABLE_TEST "Build f4ncgb_test program" ON)
 option(ENABLE_SIGNAL "Enable signal handling for printing statistics" ON)
+option(WIDE_MATRIX_OFFSETS "Address matrices with more than 2^32 nonzeros, at the cost of 8 bytes instead of 4 per row for two offset arrays. Off by default; without it those counts are checked and the program stops rather than wrapping." OFF)
 
 set(MAX_BLOCKS 16 CACHE STRING "Maximum number of blocks to compile for. Must be integral. Changes compilation time (duplicates implementation for each block).")
 
@@ -118,6 +119,13 @@ endif()
 target_compile_definitions(f4ncgb PUBLIC F4NCGB_MAX_BLOCKS=${MAX_BLOCKS})
 message(STATUS "Compiling with " ${MAX_BLOCKS} " maximum blocks")
 
+if(WIDE_MATRIX_OFFSETS)
+  message(STATUS "Matrix offsets are 64 bit")
+  target_compile_definitions(f4ncgb PUBLIC F4NCGB_WIDE_MATRIX_OFFSETS)
+else()
+  message(STATUS "Matrix offsets are 32 bit (see WIDE_MATRIX_OFFSETS)")
+endif()
+
 if(ENABLE_STORE_TRACE)
   message(STATUS "Store tracing is enabled")
   target_compile_definitions(f4ncgb PUBLIC F4NCGB_ENABLE_STORE_TRACE)
@@ -190,7 +198,10 @@ check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
 
 if(ipo_supported AND CMAKE_BUILD_TYPE MATCHES "Release")
   message(STATUS "IPO / LTO enabled (Release build and compiler supports it)")
-  set_property(TARGET f4ncgb_test PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+  # The library holds the hot code and f4ncgb_bin is what users run, so both
+  # need this at least as much as the test binary does.
+  set_property(TARGET f4ncgb f4ncgb_bin f4ncgb_test
+               PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 else()
   if(CMAKE_BUILD_TYPE MATCHES "Release")
     message(STATUS "IPO / LTO not supported: <${ipo_error}>")

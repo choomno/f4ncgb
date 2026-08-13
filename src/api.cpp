@@ -4,7 +4,10 @@
 #include "solve.hpp"
 #include <climits>
 #include <config.hpp>
+#include <exception>
+#include <limits>
 #include <numeric>
+#include <tuple>
 #include <vector>
 
 #include <ulong_extras.h>
@@ -55,18 +58,21 @@ f4ncgb_init() {
   h->ctx.impl = [h](parse_add_cb add_cb,
                     void* add_cb_userdata,
                     parse_monomial_boundary_cb boundary_cb,
-                    void* boundary_cb_userdata) {
+                    void* boundary_cb_userdata) -> parse_res {
     for(const auto& poly : h->polynomials) {
       for(const auto& [numerator, denominator, mono] : poly) {
         for(uint32_t v : mono) {
-          add_cb(add_cb_userdata, v);
+          // the callback vets the variable, so it can say no
+          if(parse_res err = add_cb(add_cb_userdata, v))
+            return err;
         }
         boundary_cb(boundary_cb_userdata,
                     numerator,
                     denominator,
                     numerator == denominator);
       }
-      add_cb(add_cb_userdata, 0);
+      if(parse_res err = add_cb(add_cb_userdata, 0))
+        return err;
     }
     return std::nullopt;
   };
@@ -227,7 +233,25 @@ f4ncgb_solve_intern_(f4ncgb_handle* h,
 
   if(h->opts.num_vars == 0)
     return F4NCGB_ARGERROR;
+  // f4ncgb_main() would refuse this too, but through die(), which would take
+  // the caller's process with it. A library has to be able to just say no.
+  if(h->opts.num_vars >= std::numeric_limits<uint16_t>::max())
+    return F4NCGB_ARGERROR;
+  // Same for the variables themselves. They are only checked once everything
+  // has been handed over, because f4ncgb_add() may well run before whatever
+  // call settles num_vars. A zero is rejected along with the out-of-range ones:
+  // it is how the parser marks the end of a polynomial, so one inside a
+  // monomial would quietly cut the polynomial short.
+  for(const auto& poly : h->polynomials)
+    for(const auto& mono : poly)
+      for(uint32_t v : std::get<2>(mono))
+        if(v == 0 || v > h->opts.num_vars)
+          return F4NCGB_ARGERROR;
   if(h->opts.num_blocks() > F4NCGB_MAX_BLOCKS)
+    return F4NCGB_ARGERROR;
+  // f4ncgb_set_blocks() numbers the variables itself, so this only bites when
+  // the block lengths and a separately set num_vars disagree.
+  if(h->opts.validate_blocks())
     return F4NCGB_ARGERROR;
   if(h->opts.characteristic > 2147483647l)// 2^31 -1
     return F4NCGB_ARGERROR;
@@ -240,12 +264,22 @@ f4ncgb_solve_intern_(f4ncgb_handle* h,
 
   h->state = F4NCGB_STATE_SOLVING;
 
-  int res = f4ncgb::f4ncgb_main(h->ctx,
-                                h->opts,
-                                { .output_name = h->output_file,
-                                  .userdata = userdata,
-                                  .add_cb = add_cb,
-                                  .end_poly_cb = end_cb });
+  // The stores signal exhaustion by throwing. This is the last C++ frame before
+  // the extern "C" boundary, and a caller on the other side of it cannot catch
+  // anything, so the exception is turned into a result code here.
+  int res;
+  try {
+    res = f4ncgb::f4ncgb_main(h->ctx,
+                              h->opts,
+                              { .output_name = h->output_file,
+                                .userdata = userdata,
+                                .add_cb = add_cb,
+                                .end_poly_cb = end_cb });
+  } catch(const std::exception& e) {
+    msg("f4ncgb_solve failed: %s", e.what());
+    h->state = F4NCGB_STATE_READY;
+    return F4NCGB_ERROR;
+  }
 
   h->state = F4NCGB_STATE_READY;
 

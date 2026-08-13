@@ -59,11 +59,17 @@ automatically found:
     cmake .. -DCMAKE_BUILD_TYPE=Release
     make -j
 
-Then, `f4ncgb`, `f4ncgb_test`, and `mod_prime_tester` are produced.
+Then, `f4ncgb` and `f4ncgb_test` are produced.
 
 The release build automatically optimizes using `-march=native`, so
 the resulting binary may not run on a machine that does not support
 the same instructions as the builder.
+
+Matrices are addressed with 32-bit offsets, which bounds a single matrix
+at 2^32 nonzero entries -- roughly forty times the largest of the included
+benchmarks. Reaching that bound is reported as an error rather than
+silently miscomputed; rebuild with `-DWIDE_MATRIX_OFFSETS=ON` to go past
+it, at eight bytes instead of four per row for two offset arrays.
 
 # Basic usage of `f4ncgb`
 
@@ -166,7 +172,7 @@ This is the same as the `poly` format, but a `var` can be a symbol
 
 This should produce the following output:
 
-    Running 12 test cases...
+    Running 13 test cases...
      
     *** No errors detected
 
@@ -178,37 +184,8 @@ and test the memory allocation to fit our requirements.
 
 ## Optimization for Mersenne Primes
 
-We provide a specialized implementation for computing modular images modulo Mersenne primes.
-To evaluate this implemenation against the standard `%`-operator, we provide the `mod_prime_tester` executable.
-
-Run the exhaustive tests:
-
-    ./mod_prime_tester -t
-
-The tests output three columns: `test`, the highest number tested (up
-to the given prime number), and the time (in seconds). Each
-calculation is checked against the standard modulo operation. Below is
-an example output using GCC 15.1 on Fedora 42 on an Intel i7-10700
-CPU.
-
-    test			2147483647	0.924757
-
-Run the benchmarks:
-
-    ./mod_prime_tester -b
-
-The benchmark output three rows: The variant (the standard modulo, the
-optimized variant using the mersenne prime `2^31-1`, and a modulo
-power-of-two variant as "upper limit" of our Mersenne-optimization, as
-the compiler can optimize a modulo power-of-two into a bitmask). The
-columns are (as in the test) the highest number tested, the time (in
-seconds) for each run, and (for the optimized variant) the speedup
-compared to the standard modulo. Below is an example output using GCC
-15.1 on Fedora 42 on an Intel i7-10700 CPU.
-
-    benchmark-standard	2147483647	3.685986
-    benchmark-optimized	2147483647	0.461233	7.991587
-    benchmark-power-of-two	2147483647	0.464492
+We provide a specialized implementation for computing modular images modulo Mersenne primes,
+used for the first prime `2^31-1` of the multi-modular Gaussian elimination.
 
 Some examples of the Mersenne Prime optimization speedups with
 different compilers and processors, each tuned to the native

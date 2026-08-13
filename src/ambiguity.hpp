@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <boost/functional/hash.hpp>
+#include <cstddef>
 #include <span>
 
 namespace f4ncgb {
@@ -56,8 +57,11 @@ struct ambiguity {
     poly_id jj = lm_to_poly[j()];
 
     fi_ = poly.multiply_front_and_back(ai(), ii, ci());
-    fj_ = poly.multiply_front_and_back(aj(), jj, cj());
     lm_ = poly.get_lm_id(fi_);
+    // ai * lm(f_i) * ci == aj * lm(f_j) * cj is what makes this an ambiguity in
+    // the first place, so the second product's leading monomial is the one just
+    // computed and does not have to be interned again.
+    fj_ = poly.multiply_front_and_back(aj(), jj, cj(), lm_);
   }
 };
 

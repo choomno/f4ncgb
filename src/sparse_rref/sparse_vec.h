@@ -3,6 +3,9 @@
 
 #include "flint/fmpz.h"
 #include <algorithm>
+#include <cassert>
+#include <cstddef>
+#include <cstdlib>
 #include <iostream>
 
 // Memory management

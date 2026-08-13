@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstring>
+#include <optional>
+
 #include "ambiguity.hpp"
 #include "store.hpp"
 
@@ -13,8 +16,9 @@ template<internal::metadata_concept M = internal::metadata<uint8_t>,
 class monomial_store;
 
 template<metadata_concept M, value_concept V, typename I, uint16_t Nblocks>
-class monomial_store : public store<monomial_store<M, V, I>, M, V, I> {
-  using self = monomial_store<M, V, I>;
+class monomial_store
+  : public store<monomial_store<M, V, I, Nblocks>, M, V, I> {
+  using self = monomial_store<M, V, I, Nblocks>;
   using base = store<self, M, V, I>;
   friend base;
 
@@ -40,8 +44,11 @@ class monomial_store : public store<monomial_store<M, V, I>, M, V, I> {
   /// caching products by their factors -- were both tried before and found
   /// slower, since each adds an indirection or a second large table. Getting
   /// past this needs fewer interned monomials, not a faster table.
-  inline void new_entry(I id) { map_.insert(std::pair((*this)[id + 1], id)); }
-
+  ///
+  /// What is left is to spend as few probes as possible. The base store does
+  /// not know about the table, so the two functions below keep it up to date
+  /// themselves rather than through a new_entry() hook -- which is what lets
+  /// get_product_id() settle insert-or-found in a single probe.
   std::optional<I> find(const std::span<const V>& v) const {
     F4NCGB_PROFILE(gstats.store_find_calls++);
     if(v.size() == 0)
@@ -55,14 +62,47 @@ class monomial_store : public store<monomial_store<M, V, I>, M, V, I> {
     return it->second + 1;
   }
 
-  public:
-  inline const I getid(const std::span<const V>& v) {
-    auto id = find(v);
-    if(!id)
-      id = base::insert(v);
-    return *id;
+  /// Commits what sits at the scratch tip and records it. `scratch` has to be
+  /// that tip: insert_scratch() commits in place, so the bytes the key points
+  /// at are the ones that end up stored.
+  inline I commit_scratch(const std::span<const V>& scratch) {
+    const I id = base::scratch_id() - 1;
+    const I res = base::insert_scratch();
+    map_.emplace(scratch, id);
+    return res;
   }
-  inline const I getid(std::vector<V> v) {
+
+  /// Deliberately not std::copy, which is a call into memmove: the runs here
+  /// are a handful of variables each and that call was 5 % of serre-e6-17. The
+  /// bound is what keeps the loop inline -- without it the compiler recognises
+  /// the idiom and puts the call back.
+  static inline V* copy_values(const std::span<const V>& src, V* dst) {
+    const size_t n = src.size();
+    const V* s = src.data();
+    if(n <= 16) {
+      for(size_t i = 0; i < n; i++)
+        dst[i] = s[i];
+    } else {
+      std::memcpy(dst, s, n * sizeof(V));
+    }
+    return dst + n;
+  }
+
+  public:
+  inline I getid(const std::span<const V>& v) {
+    // Looking before copying: most calls find the monomial already interned,
+    // and those need no scratch space at all. get_product_id() below has to
+    // write the monomial out before it can look it up, so it is the other way
+    // round there.
+    if(const auto id = find(v))
+      return *id;
+
+    auto [m, vv] = base::new_scratch(v.size());
+    copy_values(v, vv);
+    m.length = v.size();
+    return commit_scratch(std::span<const V>(vv, v.size()));
+  }
+  inline I getid(std::vector<V> v) {
     std::span<const V> s(v.begin(), v.size());
     return getid(s);
   }
@@ -70,8 +110,21 @@ class monomial_store : public store<monomial_store<M, V, I>, M, V, I> {
   /// Id of a*b*c. Absent factors are passed as id 0, the empty monomial, so
   /// this covers products of two as well.
   inline I get_product_id(I a, I b, I c = 0) {
-    const size_t length_combined = static_cast<size_t>(base::get_length(a))
-                                   + base::get_length(b) + base::get_length(c);
+    return get_product_id((*this)[a], b, (*this)[c]);
+  }
+
+  /// Same product with the outer factors handed in as values. multiply() holds
+  /// both of them fixed for a whole polynomial, so resolving them once there
+  /// keeps this off two pieces of metadata that cannot have changed.
+  inline I get_product_id(const std::span<const V>& a,
+                          I b,
+                          const std::span<const V>& c) {
+    const std::span<const V> b_v = (*this)[b];
+    const size_t length_combined = a.size() + b_v.size() + c.size();
+    // Reachable: a basis polynomial may carry a constant term, and 1*1*1 is the
+    // empty monomial, which is id 0 and is never in the table.
+    if(length_combined == 0)
+      return 0;
     if(length_combined
        > std::numeric_limits<typename base::length_type>::max()) {
       throw length_overrun_exception(
@@ -81,17 +134,22 @@ class monomial_store : public store<monomial_store<M, V, I>, M, V, I> {
 
     auto [m, vv] = base::new_scratch(length_combined);
     m.length = length_combined;
-    auto a_it = (*this)[a];
-    auto b_it = (*this)[b];
-    auto c_it = (*this)[c];
-    auto it = std::copy(a_it.begin(), a_it.end(), vv);
-    it = std::copy(b_it.begin(), b_it.end(), it);
-    std::copy(c_it.begin(), c_it.end(), it);
+    V* it = copy_values(a, vv);
+    it = copy_values(b_v, it);
+    copy_values(c, it);
 
-    auto prod_idx = find(std::span(vv, length_combined));
-    if(!prod_idx)
-      prod_idx = base::insert_scratch();
-    return *prod_idx;
+    // The product has to be written out to be looked up either way, so unlike
+    // getid() this can go straight for try_emplace and pay one probe whether
+    // the product is new or not.
+    F4NCGB_PROFILE(gstats.store_find_calls++);
+    auto [entry, inserted]
+      = map_.try_emplace(std::span<const V>(vv, length_combined),
+                         base::scratch_id() - 1);
+    if(!inserted) {
+      F4NCGB_PROFILE(gstats.store_find_hits++);
+      return entry->second + 1;
+    }
+    return base::insert_scratch();
   }
 
   std::ostream& print_monomial(I i, std::ostream& o) const {

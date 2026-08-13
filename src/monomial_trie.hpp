@@ -1,6 +1,8 @@
 #ifndef MONOMIAL_TRIE_H
 #define MONOMIAL_TRIE_H
 
+#include <bit>
+#include <cassert>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -20,12 +22,24 @@ struct monomial_trie {
 
   using match = std::pair<I, size_t>;
 
+  /// Inverse of an odd `d` modulo 2^64. Newton doubles the number of correct
+  /// bits per step and x = 1 starts with one, so six steps cover all 64.
+  static constexpr uint64_t inverse_mod_2_64(uint64_t d) {
+    uint64_t x = 1;
+    for(int i = 0; i < 6; i++)
+      x *= 2 - d * x;
+    return x;
+  }
+
   monomial_trie(size_t n)
     : entered_by(n + 1)
     , child_size(n) {
-    nodes.reserve((child_size + 1) * 1024);
+    const size_t node_size = child_size + 1;
+    node_shift_ = static_cast<size_t>(std::countr_zero(node_size));
+    node_inv_ = inverse_mod_2_64(node_size >> node_shift_);
+    nodes.reserve(node_size * 1024);
     // insert root
-    nodes.insert(nodes.end(), child_size + 1, 0);
+    nodes.insert(nodes.end(), node_size, 0);
   }
   // -----------------------------------------------------------------
 
@@ -67,10 +81,18 @@ struct monomial_trie {
   }
   // -----------------------------------------------------------------
 
-  void inline insert(const std::span<const V>& entry, I id) {
+  /// `weight` is carried through to for_each_shortest_divisor() untouched. It
+  /// lets find_reducer() rank a candidate without resolving it back to a
+  /// polynomial, which is a hash probe and a read into the polynomial pool.
+  void inline insert(const std::span<const V>& entry,
+                     I id,
+                     uint32_t weight = 0) {
     const size_t cur_idx = walk_creating(entry.begin(), entry.end());
     assert(nodes[cur_idx] == 0);
     nodes[cur_idx] = id;
+    if(node_weight.size() < nodes.size())
+      node_weight.resize(nodes.size(), 0);
+    node_weight[cur_idx] = weight;
   }
   // -----------------------------------------------------------------
 
@@ -82,6 +104,7 @@ struct monomial_trie {
   void inline clear() {
     nodes.resize(child_size + 1);
     std::fill(nodes.begin(), nodes.end(), 0);
+    node_weight.clear();
     for(auto& nodes_of_var : entered_by)
       nodes_of_var.clear();
     links_valid = false;
@@ -113,20 +136,30 @@ struct monomial_trie {
   /// monomials reach into each other is decided by where the subtree starts.
   /// Inclusions want it to grow with the descent, because there the depth is
   /// the length of the part trailing the occurrence.
+  ///
+  /// Walked with an explicit stack rather than by recursion, which went one
+  /// frame deep per variable of the word: a monomial of degree 100000, which
+  /// the parser accepts, overran the 8 MB stack somewhere past 60000.
   template<bool depth_grows>
-  void inline collect_words(size_t idx,
-                            std::vector<match>& res,
-                            size_t depth) const {
-    uint64_t word = nodes[idx];
-    if(word != 0)
-      res.emplace_back(word, depth);
+  void inline collect_words(size_t idx, std::vector<match>& res, size_t depth) {
+    walk_stack.clear();
+    walk_stack.emplace_back(idx, depth);
 
-    // Recursively visit all children
-    for(size_t i = idx + 1; i < idx + 1 + child_size; i++) {
-      uint64_t child_idx = nodes[i];
-      if(child_idx != 0)
-        collect_words<depth_grows>(
-          child_idx, res, depth_grows ? depth + 1 : depth);
+    while(!walk_stack.empty()) {
+      const auto [cur, d] = walk_stack.back();
+      walk_stack.pop_back();
+
+      uint64_t word = nodes[cur];
+      if(word != 0)
+        res.emplace_back(word, d);
+
+      // Pushed back to front, so that they come off in increasing order --
+      // which is the order the recursion visited them in.
+      for(size_t i = cur + child_size; i > cur; i--) {
+        uint64_t child_idx = nodes[i];
+        if(child_idx != 0)
+          walk_stack.emplace_back(child_idx, depth_grows ? d + 1 : d);
+      }
     }
   }
   // -----------------------------------------------------------------
@@ -219,39 +252,24 @@ struct monomial_trie {
   }
   // -----------------------------------------------------------------
 
-  /// The occurrence a reducer should be built from: among the stored words that
-  /// divide `dividend`, the one `prefers` ranks first, and among its
-  /// occurrences the last one. Returns word 0 when nothing divides.
-  ///
-  /// This is the question a pattern matcher answers, so it is answered the way
-  /// one does: read `dividend` once, following a failure link whenever the next
-  /// variable cannot be read. Restarting at the root for each of the suffixes
-  /// instead costs a walk per suffix, and those walks are the bulk of symbolic
-  /// preprocessing on examples with long monomials.
-  ///
-  /// The winner is picked as occurrences turn up, so the full list -- which the
-  /// one caller would only scan once and throw away -- never gets built.
-  /// `prefers(a, b)` is true when word a ranks before word b.
-  /// Every occurrence of a stored word in `dividend`, as (word, position).
+  /// Calls `visit(word, position, weight)` once per position of `dividend` at
+  /// which a stored word ends, with the shortest such word.
   ///
   /// This is the question a pattern matcher answers, so it is answered the way
   /// one does: read `dividend` once, following a failure link whenever the next
   /// variable cannot be read. Restarting at the root for each suffix instead
   /// costs a walk per suffix.
   ///
-  /// The caller wants one occurrence out of this and picks it afterwards.
-  /// Choosing during the walk instead, so the vector is never built, measured
-  /// exactly the same on 4nilp5s-10 -- the intermediate vector is not what this
-  /// costs. Collecting keeps the trie free of the caller's ordering rule, so it
-  /// is the shape that stayed.
-  ///
-  /// Occurrences come out ordered by where they end rather than where they
-  /// start; find_reducer(), the only caller, states which one it wants outright
-  /// rather than relying on the order.
-  const std::vector<match>& divisors(const std::span<const V>& dividend) {
+  /// Reporting only the shortest word per position is what min_word gives in a
+  /// single read; the alternative is a random read per word ending there, down
+  /// the dictionary chain. The caller decides what that restriction costs it --
+  /// for the smallest divisor in the monomial order it costs nothing, see
+  /// find_reducer().
+  template<typename Visit>
+  void for_each_shortest_divisor(const std::span<const V>& dividend,
+                                 Visit visit) {
     if(!links_valid)
       build_links();
-    match_buffer.clear();
     uint64_t cur = 0;
     for(size_t pos = 0; pos < dividend.size(); pos++) {
       const auto c = dividend[pos];
@@ -260,35 +278,31 @@ struct monomial_trie {
       while(!nodes[cur + c] and cur != 0)
         cur = fail_link[node_number(cur)];
       cur = nodes[cur + c];
-      const size_t cur_no = node_number(cur);
 
-      // the word ending here, then the shorter ones ending here
-      if(nodes[cur])
-        match_buffer.emplace_back(static_cast<I>(nodes[cur]),
-                                  pos + 1 - node_depth[cur_no]);
-      for(uint64_t d = dict_link[cur_no]; d;) {
-        const size_t d_no = node_number(d);
-        match_buffer.emplace_back(static_cast<I>(nodes[d]),
-                                  pos + 1 - node_depth[d_no]);
-        d = dict_link[d_no];
-      }
+      const word_ref w = min_word[node_number(cur)];
+      if(w.id)
+        visit(static_cast<I>(w.id), pos + 1 - w.len, w.weight);
     }
-    return match_buffer;
   }
 
   // -----------------------------------------------------------------
 
   /// Rebuilt on demand after an insertion, which costs one breadth-first pass
-  /// over the trie. The trie only grows between F4 iterations, while divisors()
-  /// runs once per column of the next matrix, so this is paid once per
-  /// iteration.
+  /// over the trie. The trie only grows between F4 iterations, while
+  /// min_divisor() runs once per column of the next matrix, so this is paid
+  /// once per iteration.
+  ///
+  /// The dictionary links and the node depths are only ever wanted here, to
+  /// fold into min_word, so they live for the length of this call rather than
+  /// alongside the trie.
   void build_links() {
     const size_t node_size = child_size + 1;
     const size_t count = nodes.size() / node_size;
 
     fail_link.assign(count, 0);
-    dict_link.assign(count, 0);
-    node_depth.assign(count, 0);
+    min_word.assign(count, word_ref{});
+    std::vector<uint64_t> dict_link(count, 0);
+    std::vector<uint32_t> node_depth(count, 0);
 
     // breadth first, so that a node's failure link is known before its children
     // need it. Nodes of depth 1 keep the defaults: they fall back to the root.
@@ -297,7 +311,13 @@ struct monomial_trie {
     for(size_t c = 1; c <= child_size; c++) {
       const uint64_t child = nodes[c];
       if(child) {
-        node_depth[node_number(child)] = 1;
+        const size_t child_no = node_number(child);
+        node_depth[child_no] = 1;
+        // no proper suffix to fall back on, so the node's own word is all there
+        // can be
+        if(nodes[child])
+          min_word[child_no]
+            = { static_cast<I>(nodes[child]), 1, weight_of(child) };
         queue.push_back(child);
       }
     }
@@ -311,7 +331,8 @@ struct monomial_trie {
         if(!child)
           continue;
         const size_t child_no = node_number(child);
-        node_depth[child_no] = node_depth[cur_no] + 1;
+        const uint32_t depth = node_depth[cur_no] + 1;
+        node_depth[child_no] = depth;
 
         // longest proper suffix of this node that is itself a node
         uint64_t f = fail_link[cur_no];
@@ -321,7 +342,18 @@ struct monomial_trie {
         fail_link[child_no] = fl;
 
         // nearest shorter suffix that is a stored word
-        dict_link[child_no] = nodes[fl] ? fl : dict_link[node_number(fl)];
+        const uint64_t dl = nodes[fl] ? fl : dict_link[node_number(fl)];
+        dict_link[child_no] = dl;
+
+        // Shortest stored word that is a suffix of this one. A proper suffix is
+        // shorter than the node's own word, so it wins whenever there is one,
+        // and the chain from it was already folded up -- breadth first, and
+        // dictionary links only ever point at shallower nodes.
+        if(dl)
+          min_word[child_no] = min_word[node_number(dl)];
+        else if(nodes[child])
+          min_word[child_no]
+            = { static_cast<I>(nodes[child]), depth, weight_of(child) };
 
         queue.push_back(child);
       }
@@ -353,21 +385,44 @@ struct monomial_trie {
   }
 
   private:
-  /// Returned by divisors() and get_prefixes(). They share it because neither
-  /// result outlives the other's next call, and reusing it keeps both from
-  /// reallocating on every query.
+  /// Returned by get_prefixes(), and reused across calls so that it stops
+  /// reallocating.
   std::vector<match> match_buffer;
 
+  /// (node, depth) still to visit in collect_words(). A member for the same
+  /// reason: the calls are sequential, never nested.
+  std::vector<std::pair<uint64_t, size_t>> walk_stack;
+
+  /// Exact division: every node offset is a multiple of the node size, so the
+  /// odd part can be inverted modulo 2^64 instead of divided by. A real
+  /// division here costs more than the rest of a min_divisor() step, and there
+  /// is one per character.
+  size_t node_shift_ = 0;
+  uint64_t node_inv_ = 1;
   size_t inline node_number(uint64_t idx) const {
-    return idx / (child_size + 1);
+    return (idx >> node_shift_) * node_inv_;
   }
 
-  /// Aho-Corasick links, by node number. `fail_link` is the longest proper
-  /// suffix of a node that is a node itself, `dict_link` the nearest one that
-  /// is a stored word, `node_depth` the length of the word ending at the node.
+  /// A stored word, its length, and whatever insert() attached to it. All zero
+  /// for "no word".
+  struct word_ref {
+    I id = 0;
+    uint32_t len = 0;
+    uint32_t weight = 0;
+  };
+
+  /// Aho-Corasick state, by node number. `fail_link` is the longest proper
+  /// suffix of a node that is a node itself; `min_word` is the shortest stored
+  /// word that is a suffix of the word ending at the node, which is where the
+  /// dictionary chain leads and all min_divisor() wants of it.
   std::vector<uint64_t> fail_link;
-  std::vector<uint64_t> dict_link;
-  std::vector<uint32_t> node_depth;
+  std::vector<word_ref> min_word;
+  /// insert()'s `weight`, by node offset rather than node number: it is written
+  /// where the word is stored and read once per node in build_links().
+  std::vector<uint32_t> node_weight;
+  uint32_t weight_of(uint64_t idx) const {
+    return idx < node_weight.size() ? node_weight[idx] : 0;
+  }
   bool links_valid = false;
 };
 }

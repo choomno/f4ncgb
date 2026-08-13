@@ -1,6 +1,7 @@
 #include "store_tracer.hpp"
 #include "zip_utils.hpp"
 #include <chrono>
+#include <cstdio>
 
 namespace f4ncgb {
 std::string store_tracer::prefix_ = "trace";

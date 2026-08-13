@@ -4,6 +4,8 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <format>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -58,6 +60,39 @@ struct solve_options {
     for(size_t i = 0; i < blocks.size(); i++)
       res[i] = blocks[i].size();
     return res;
+  }
+
+  /// Blocks have to name 1..num_vars, in order and once each.
+  ///
+  /// Only their sizes ever reach the algorithm -- monomial_store::set_blocks()
+  /// turns those into the range of variables each block covers, which is only
+  /// the block the input meant if the variables run consecutively through them.
+  /// A block naming anything else is not rejected anywhere downstream; it just
+  /// sorts by ranges nobody asked for.
+  std::optional<std::string> validate_blocks() const {
+    if(blocks.empty())
+      return std::nullopt;
+
+    var_id expected = 1;
+    for(size_t i = 0; i < blocks.size(); i++)
+      for(var_id v : blocks[i]) {
+        if(v != expected)
+          return std::format("block {} names variable {} where {} was "
+                             "expected: blocks have to cover 1..{} in order",
+                             i,
+                             v,
+                             expected,
+                             num_vars);
+        expected++;
+      }
+
+    if(expected - 1 != num_vars)
+      return std::format(
+        "the blocks name {} variables but the problem declares {}",
+        expected - 1,
+        num_vars);
+
+    return std::nullopt;
   }
 };
 }

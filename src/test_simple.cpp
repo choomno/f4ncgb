@@ -116,19 +116,33 @@ BOOST_AUTO_TEST_CASE(simple_polynomials) {
   BOOST_TEST(p.get_coefficients(p2)[0] == I::coefficient(3l));
   BOOST_TEST(p.get_coefficients(p2)[1] == I::coefficient(4l));
 
-  I::idx p3 = p.multiply_front(s.getid({ 1, 2 }), p1);
-  I::idx p4 = p.multiply_back(p2, s.getid({ 1, 2 }));
+  // An absent factor is the empty monomial, id 0
+  I::idx p3 = p.multiply_front_and_back(0, p2, s.getid({ 1, 2 }));
 
   // Printing is also possible:
 
   //   std::cout << "p1: " << p1 << ", p2: " << p2 << ", p3: " << p3
-  //             << ", p4: " << p4 << std::endl;
+  //             << std::endl;
   //
   //   s.print(std::cout);
   //   p.print(std::cout);
 
-  BOOST_TEST(p.get_monomial_id(p3, 0) == s.getid({ 1, 2, 2, 3 }));
-  BOOST_TEST(p.get_monomial_id(p4, 0) == s.getid({ 3, 4, 1, 2 }));
+  BOOST_TEST(p.get_monomial_id(p3, 0) == s.getid({ 3, 4, 1, 2 }));
+
+  // A factor on both sides, which is the only shape the algorithm itself uses
+  I::idx f = s.getid({ 1, 2 });
+  I::idx b = s.getid({ 4 });
+  I::idx p4 = p.multiply_front_and_back(f, p2, b);
+
+  BOOST_TEST(p.get_monomial_id(p4, 0) == s.getid({ 1, 2, 3, 4, 4 }));
+  BOOST_TEST(p.get_monomial_id(p4, 1) == s.getid({ 1, 2, 5, 6, 4 }));
+
+  // Handing the leading monomial in instead of interning it has to give the
+  // same polynomial back, tail included -- that form skips the first product,
+  // so it is the rest of the loop that has to stay in step.
+  I::idx p5 = p.multiply_front_and_back(f, p2, b, s.getid({ 1, 2, 3, 4, 4 }));
+
+  BOOST_TEST(std::equal(p[p4].begin(), p[p4].end(), p[p5].begin(), p[p5].end()));
 }
 
 template<size_t N>
@@ -229,13 +243,17 @@ BOOST_AUTO_TEST_CASE(parse_small_ms_into_polynomial) {
   BOOST_CHECK(b0[1] == 2);
 
   std::vector<coeff> input_denoms;
-  r = parse_rest_into_polynomial_store(ctx, ps, input_denoms);
+  r = parse_rest_into_polynomial_store(ctx, ps, input_denoms, opts.num_vars);
   BOOST_REQUIRE(!r.has_value());
 
   std::vector<I::idx> polys(ps.begin(), ps.end());
   BOOST_REQUIRE(polys[0] == 0);
   BOOST_REQUIRE(polys[1] == 1);
-  BOOST_REQUIRE(polys[2] == 21);
+  // The only place the id encoding is pinned down. An id counts alignof(M)-
+  // sized slots from the start of the pool, plus one for the reserved 0: the
+  // first polynomial has two terms, so it occupies
+  // sizeof(polynomial_metadata) + 2 * sizeof(I) = 20 bytes = 5 slots.
+  BOOST_REQUIRE(polys[2] == 6);
   std::vector<I::idx> poly1(ps[polys[1]].begin(), ps[polys[1]].end());
 
   BOOST_TEST(poly1[0] == 3);
@@ -259,7 +277,7 @@ BOOST_AUTO_TEST_CASE(parse_braid3) {
   BOOST_REQUIRE(!r.has_value());
 
   std::vector<coeff> input_denoms;
-  r = parse_rest_into_polynomial_store(ctx, ps, input_denoms);
+  r = parse_rest_into_polynomial_store(ctx, ps, input_denoms, opts.num_vars);
   BOOST_REQUIRE(!r.has_value());
 
   BOOST_CHECK(opts.characteristic == 0);

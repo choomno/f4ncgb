@@ -111,6 +111,9 @@ f4ncgb_reduce(f4ncgb_handle*,
 #include <functional>
 #include <memory>
 #include <span>
+#include <stdexcept>
+#include <string>
+#include <tuple>
 #include <vector>
 
 #include "coeff.hpp"
