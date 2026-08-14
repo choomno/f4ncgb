@@ -1,26 +1,26 @@
 # f4ncgb
 
-`f4ncgb` is an open-source C++ library for computing noncommutative Gröbner bases
+`f4ncgb` ("fancy-gb") is an open-source C++ library for computing noncommutative Gröbner bases
 in free algebras (with rational coefficients or coefficients in a prime field). 
 It transfers recent advancements in commutative Gröbner basis software to the
 noncommutative setting.
 
-Below is a runtime comparison (in seconds) of `f4ncgb` with the state-of-the-art tool [Singular](https://www.singular.uni-kl.de/index.php.html).
+Below is a runtime comparison (in seconds) of `f4ncgb` (version 1.1.0) with the state-of-the-art tool [Singular](https://www.singular.uni-kl.de/index.php.html).
 All benchmarks are part of the [SymbolicData project](https://symbolicdata.github.io).
 
 
 | Example&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; | Singular&nbsp;&nbsp;&nbsp; | f4ncgb&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (1 core) |  f4ncgb&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (2 cores) |  f4ncgb&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; (4 cores) |  f4ncgb&nbsp;&nbsp;&nbsp;&nbsp; (8 cores) | 
 | --------- | ------ |-----|------- | ------ |-----|
-| 4nilp5s-10 |  1 282.44 | 150.46 | 96.83 | 79.47  | 65.96  |
-| braid3-16  | 18 953.19  | 105.46 |  64.92  |    34.58     |   23.96   |
-| braidX-18  | >43 200 | 1 977.27 | 1 018.47 |  601.12  | 364.29 |
-| braidXY-12 | 1 847.97 | 62.40  | 55.45 | 52.44 | 53.51  |
-| holt_G3562h-17  | >43 200 | 25 021.62 | 14 660.04 | 12 671.38 | 8915.69 |
-| lascala_neuh-13  | 171.95 | 9.84 | 7.08 | 5.50 | 4.98 |
-| lv2d10-100  | >43 200 | 48.43 | 34.31 | 27.68 | 26.98 |
-| malle_G12h-100  | 4 142.27 | 89.93 | 78.04 | 74.15 | 74.19 | 
-|  serre-e6-17 | 113.95 | 130.62 | 130.07 | 130.53 | 131.01 |
-| serre-ha11-17 | 99.09 | 38.18 | 32.79 | 31.66 | 30.77 |
+| 4nilp5s-10 |  1 217.19 | 37.47 | 28.76 | 22.99  | 21.85  |
+| braid3-16  | 18 314.52  | 16.47 |  10.25  |    6.80     |   5.30   |
+| braidX-18  | >43 200 | 341.51 | 286.92 |  161.20  | 89.47 |
+| braidXY-12 | 1 608.16 | 15.08  | 10.34 | 8.03 | 6.86  |
+| holt_G3562h-17  | >43 200 | 243.45 | 145.54 | 96.16 | 71.01 |
+| lascala_neuh-13  | 166.95 | 1.11 | 1.17 | 1.07 | 1.08 |
+| lv2d10-100  | >43 200 | 10.22 | 10.72 | 10.24 | 10.69 |
+| malle_G12h-100  | 3 934.29 | 44.86 | 45.68 | 45.01 | 44.79 | 
+|  serre-e6-17 | 107.46 | 53.65 | 53.67 | 53.30 | 52.89 |
+| serre-ha11-17 | 94.85 | 12.92 | 11.48 | 10.65 | 10.82 |
 
 
 # Table of Contents
@@ -64,12 +64,6 @@ Then, `f4ncgb` and `f4ncgb_test` are produced.
 The release build automatically optimizes using `-march=native`, so
 the resulting binary may not run on a machine that does not support
 the same instructions as the builder.
-
-Matrices are addressed with 32-bit offsets, which bounds a single matrix
-at 2^32 nonzero entries -- roughly forty times the largest of the included
-benchmarks. Reaching that bound is reported as an error rather than
-silently miscomputed; rebuild with `-DWIDE_MATRIX_OFFSETS=ON` to go past
-it, at eight bytes instead of four per row for two offset arrays.
 
 # Basic usage of `f4ncgb`
 
@@ -161,11 +155,6 @@ DIMACS format that SAT-solvers use. We provide a simplified EBNF below.
     
     digit          := "0"..."9" .
 
-## `sympoly` Input Format
-
-This is the same as the `poly` format, but a `var` can be a symbol
-(ident).
-
 # Tests
 
     ./f4ncgb_test
@@ -181,7 +170,6 @@ and test the memory allocation to fit our requirements.
 
 # Additional features
 
-
 ## Optimization for Mersenne Primes
 
 We provide a specialized implementation for computing modular images modulo Mersenne primes,
@@ -195,7 +183,6 @@ the optimized variant is slower for Clang, GCC produces binaries that
 overall are faster than the ones from Clang.
 
 <table border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
-
 
 <colgroup>
 <col  class="org-left" />
@@ -292,37 +279,6 @@ overall are faster than the ones from Clang.
 </tbody>
 </table>
 
-## Store Access Patterns
-
-The store supports writing traces of when which index is accessed
-through `operator[]`. This accurately represents what areas in which
-store are being used over time. Below are some renderings of these
-access patterns for smaller input files.
-
-In order to create these images, add the CMake parameter
-`-DENABLE_STORE_TRACE=ON` during compilation. Then the resulting store creates two
-archives: `<input>_monomial_store.zst` and
-`<input>_polynomial_store.zst`. These can be turned into two PNGs
-using Gnuplot by adding the `<input>` file as parameter, using our
-provided script: `gnuplot -e "name='<input>'"
-scripts/index_map.gnuplot`. Gnuplot may require very large amounts of
-RAM for this step, as it renders each access individually as a point.
-
-Creating the access patterns requires [Gnuplot](http://www.gnuplot.info/).
-
-Here are examples of the access patterns for the input
- `test_inputs/braid3.ms` with default options of `f4ncgb`
-
-### Monomial Store Accesses
-
-![img](figures/braid3.ms_monomial_store_accesses.png)
-
-
-### Polynomial Store Accesses
-
-![img](figures/braid3.ms_polynomial_store_accesses.png)
-
-
 # Citing `f4ncgb`
 
 If you have used `f4ncgb` for a paper, we would kindly ask you to cite it as:
@@ -343,7 +299,6 @@ Or, if you are using BibTeX:
     publisher="Springer Nature Switzerland",
     address="Cham",
     pages="79--97"}
-
 
 
 The paper can be found [here](https://doi.org/10.1007/978-3-032-09645-6_5).
