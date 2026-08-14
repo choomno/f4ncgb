@@ -181,6 +181,17 @@ struct f4 {
   std::vector<triplet> extended_spolies;
   std::vector<triplet> extended_reducers;
   std::vector<std::vector<cofactor>> cofactors;
+
+  /// The denominator each cofactor list is written over: the coefficient that
+  /// gets printed for cofactors[n][k] is its c divided by cofactor_denom[n].
+  ///
+  /// It starts out as the leading coefficient of element n, because the basis
+  /// is stored with integer coefficients and only made monic on the way out --
+  /// so the cofactors of the stored polynomial have to be scaled by the same
+  /// factor as the polynomial itself. Expanding changes it: a substituted
+  /// element brings its own denominator along, and the two have to be put over
+  /// a common one to stay in the integers.
+  std::vector<coeff> cofactor_denom;
   //------------------------------------------------------------------------------
   inline parse_res read_input(parser_context& context) {
     parse_res res
@@ -775,25 +786,68 @@ struct f4 {
   }
 
   //------------------------------------------------------------------------------
+  /// Divides a cofactor list and its denominator by what they have in common.
+  ///
+  /// Without this the denominators multiply up through the iterations, since
+  /// every expansion folds in the ones of everything it substitutes -- they
+  /// reach tens of digits within ten iterations of braid3-16 alone, and the
+  /// coefficients carry them.
+  static void cancel_common_factor(std::vector<cofactor>& cf, coeff& denom) {
+    if(cf.empty())
+      return;
+
+    coeff g = denom;
+    for(const auto& c : cf) {
+      g.gcd_inplace(c.c);
+      if(g.is_one())
+        return;
+    }
+
+    for(auto& c : cf)
+      c.c /= g;
+    denom /= g;
+  }
+  //------------------------------------------------------------------------------
   void log_cofactors() {
+
+    // The new elements are still stored unnormalized, so their cofactors are
+    // too. See cofactor_denom.
+    cofactor_denom.resize(cofactors.size());
+    for(size_t n = basis.size(); n < cofactors.size(); n++)
+      cofactor_denom[n]
+        = *poly.get_coefficients(new_elements[n - basis.size()]).begin();
 
     // compute expanded proofs
     if(state.proof_level > 1 and basis.size() > 1) {
       std::vector<cofactor> expanded;
       for(size_t n = basis.size(); n < cofactors.size(); n++) {
         expanded.clear();
+
+        // Substituting element i multiplies by a coefficient of
+        // cofactors[i], which is written over cofactor_denom[i] rather than
+        // over 1. Collecting those into one denominator for the whole list
+        // keeps every coefficient an integer, as each of them divides it.
+        coeff common(1);
+        for(const auto& cofactor : cofactors[n]) {
+          assert((size_t)cofactor.i() < basis.size());
+          common.lcm_inplace(cofactor_denom[(size_t)cofactor.i()]);
+        }
+
         for(const auto& cofactor : cofactors[n]) {
           const coeff& c = cofactor.c;
           mon_id a = cofactor.a();
           mon_id b = cofactor.b();
+          const coeff scale = common / cofactor_denom[(size_t)cofactor.i()];
           for(const auto& cofactor_i : cofactors[(size_t)cofactor.i()]) {
-            coeff cc = c * cofactor_i.c;
+            coeff cc = c * cofactor_i.c * scale;
             mon_id aa = mons.get_product_id(a, cofactor_i.a());
             mon_id bb = mons.get_product_id(cofactor_i.b(), b);
-            expanded.emplace_back(cc, aa, cofactor_i.i(), bb);
+            expanded.emplace_back(std::move(cc), aa, cofactor_i.i(), bb);
           }
         }
         cofactors[n] = std::move(expanded);
+        cofactor_denom[n] *= common;
+        cancel_common_factor(cofactors[n], cofactor_denom[n]);
       }
       // non-expanded proof
     } else if(state.proof_level == 1) {
@@ -814,9 +868,8 @@ struct f4 {
     for(size_t n = basis.size(); n < cofactors.size(); n++) {
       first = true;
       poly_id p = new_elements[n - basis.size()];
-      const coeff& lc = *poly.get_coefficients(p).begin();
       for(const auto& cofactor : cofactors[n]) {
-        cofactor.log(proof_file, context, mons, lc, first);
+        cofactor.log(proof_file, context, mons, cofactor_denom[n], first);
         first = false;
       }
       proof_file << std::endl;
