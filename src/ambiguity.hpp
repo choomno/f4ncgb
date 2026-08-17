@@ -17,7 +17,6 @@ size_t inline compute_hash(const std::array<I, 7>& values) noexcept {
   return seed;
 }
 
-// container to store when two monomials overlap
 template<typename I>
 struct ambiguity {
   std::array<I, 7> values;
@@ -58,9 +57,8 @@ struct ambiguity {
 
     fi_ = poly.multiply_front_and_back(ai(), ii, ci());
     lm_ = poly.get_lm_id(fi_);
-    // ai * lm(f_i) * ci == aj * lm(f_j) * cj is what makes this an ambiguity in
-    // the first place, so the second product's leading monomial is the one just
-    // computed and does not have to be interned again.
+    // ai * lm(f_i) * ci == aj * lm(f_j) * cj, 
+    // so the second lm does not have to be computed again.
     fj_ = poly.multiply_front_and_back(aj(), jj, cj(), lm_);
   }
 };

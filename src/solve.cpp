@@ -98,8 +98,6 @@ struct f4_wrapper : f4_base {
       msg("Max. Iterations:   %lu", opts.maxiter);
       msg("Max. amb. degree:  %lu", opts.maxdeg);
     }
-    // "%s", not the string itself: a variable name or an output path may
-    // contain a '%', which as a format would read an argument that is not there
     msg("%s", mon_order.str().c_str());
     msg("Nr. threads:       %lu", opts.threads);
     msg("%s", out_name.c_str());
@@ -199,10 +197,6 @@ f4ncgb_main(parser_context& context,
       if(run.stats_print_function) {
         *run.stats_print_function = []() {};
       }
-
-    // Tearing the stores down costs time and the caller may not need it. Only
-    // skipped when nothing is watching: not under AddressSanitizer, not with
-    // assertions on, and not while dumping stores.
 
 #if defined(__has_feature) && NDEBUG && !defined(F4NCGB_ENABLE_STORE_DUMP)
 #if !__has_feature(address_sanitizer)

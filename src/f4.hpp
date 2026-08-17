@@ -62,9 +62,7 @@ struct f4 {
   using monomial_trie_ = monomial_trie<V, I>;
 
   public:
-  /// Names, for printing monomials back out, and for reading the input.
   parser_context& context;
-  /// What this computation was asked to do.
   const solve_options& opts;
 
   monomial_store mons;
@@ -81,8 +79,6 @@ struct f4 {
   std::vector<poly_id> reducers;
   std::vector<mon_id> columns;
 
-  /// Everything the parser and the linear algebra need to see of this
-  /// computation. Owning it here is what keeps concurrent solves apart.
   solve_state state;
 
   size_t characteristic = 0;
@@ -181,16 +177,6 @@ struct f4 {
   std::vector<triplet> extended_spolies;
   std::vector<triplet> extended_reducers;
   std::vector<std::vector<cofactor>> cofactors;
-
-  /// The denominator each cofactor list is written over: the coefficient that
-  /// gets printed for cofactors[n][k] is its c divided by cofactor_denom[n].
-  ///
-  /// It starts out as the leading coefficient of element n, because the basis
-  /// is stored with integer coefficients and only made monic on the way out --
-  /// so the cofactors of the stored polynomial have to be scaled by the same
-  /// factor as the polynomial itself. Expanding changes it: a substituted
-  /// element brings its own denominator along, and the two have to be put over
-  /// a common one to stay in the integers.
   std::vector<coeff> cofactor_denom;
   //------------------------------------------------------------------------------
   inline parse_res read_input(parser_context& context) {
@@ -276,8 +262,7 @@ struct f4 {
 
   std::vector<poly_id> input;
   void compute_basis() {
-    // add something at 0th position
-    // so that index 0 remains free
+    // index 0 shall remain free
     basis.push_back(0);
     input.clear();
     input.resize(poly.size() - 1);
@@ -300,8 +285,6 @@ struct f4 {
 
       spolies.clear();
       symbolic_preprocessing();
-
-      // store results in new_elements
       reduction();
 
       if(verbose > 1)
@@ -329,10 +312,7 @@ struct f4 {
     poly_id p = input.back();
     input.pop_back();
 
-    // Set the parameters for the reduce path. Both overrides are deliberate:
-    // the normal form is read back out of the cofactors, so proof logging has
-    // to be on whatever the caller asked for, and the reduction runs for a
-    // bounded number of rounds rather than the caller's iteration budget.
+    // set the parameters for the reduce path
     state.reduce_mode = true;
     maxiter = 10;
     state.proof_level = 1;
@@ -399,19 +379,9 @@ struct f4 {
   //------------------------------------------------------------------------------
   std::vector<char> to_remove;
   std::vector<mon_id> next_same_ci;
-  /// Drops the ambiguities that Gebauer and Moeller's criteria make redundant
-  /// and files the rest under their degree.
-  ///
-  /// The two sorts look like one too many -- deduplicating through a hash set
-  /// would be cheaper than sorting 48-byte ambiguities by (hash, values). They
-  /// are not interchangeable though: that first sort is what puts the list in a
-  /// canonical order, the second one can tie, and the filter below depends on
-  /// which of two tied ambiguities it sees first. Replacing it changes which
-  /// ambiguities get dropped, unless the second sort is given a total
-  /// tie-break.
   void gebauer_moeller(std::vector<ambiguity_>& new_amb) {
     // first index is always the newer polynomial
-
+    
     // sort to group identical elements and remove duplicates
     std::sort(new_amb.begin(),
               new_amb.end(),
@@ -422,11 +392,6 @@ struct f4 {
               });
     new_amb.erase(std::unique(new_amb.begin(), new_amb.end()), new_amb.end());
 
-    // Sorting through a proxy -- (degree, j, packed monomial key, index), so
-    // that the comparator stays out of the ambiguities and out of the monomial
-    // pool -- was tried here and on the sort above, and measured exactly the
-    // same on lv2d10-100, where gebauer_moeller is 2.5 of 7.1 seconds. Neither
-    // sort is what this costs; the divisibility filter below is.
     auto cmp = [this](const ambiguity_& a, const ambiguity_& b) {
       if(a.degree() != b.degree())
         return a.degree() < b.degree();
@@ -532,10 +497,6 @@ struct f4 {
       F4NCGB_TIME(inclusion);
       // inclusions with m = ABC
       I d = m.size();
-      // Every one of these has degree |m|, so the bound is checked once for all
-      // of them rather than per match. It can only bite when an input
-      // polynomial is itself longer than the bound: everything derived later is
-      // bounded by the ambiguities it came from.
       if(d <= maxdeg) {
         // k determines where B starts in m = ABC
         for(const auto& [j, k] : inclusions) {
@@ -573,30 +534,10 @@ struct f4 {
 
   //------------------------------------------------------------------------------
 
-  /// Monomial -> its slot, the position it was first seen at. `columns` is
-  /// indexed by slot until sort_columns() puts it in monomial order.
   boost::unordered_flat_map<mon_id, uint32_t> todo_seen;
-  /// Slots of the critical pairs' leading monomials, ascending.
   std::vector<uint32_t> pivot_slots;
-  /// Columns the last matrix had, to size this one from.
   size_t last_columns = 0;
 
-  /// Collects the rows of the next matrix into spolies/reducers, its columns
-  /// into `columns`, and each row's columns into idxs_spol/idxs_red.
-  ///
-  /// The columns come for free: every monomial of every row is passed to
-  /// touch() anyway, so `todo_seen` is exactly the column set. Only the
-  /// critical pairs' leading monomials are held back from the reducer search --
-  /// they are pivots, and looking for a reducer for them would add a redundant
-  /// row -- so `columns` doubles as the queue and their slots are noted to be
-  /// skipped. It used to be copied into a second vector instead, which on the
-  /// last serre-e6-17 matrix is 87 MB of a 6.3 GB run.
-  ///
-  /// The row indices come for free too, which is the reason touch() hands back
-  /// a slot instead of just recording the monomial. Reading them off afterwards
-  /// meant a second hash table from monomial to column and a probe into it per
-  /// nonzero -- 7.5 M of them on the last braid3-16 matrix. Slots are dense, so
-  /// sort_columns() can hand back a plain array to renumber through instead.
   void symbolic_preprocessing() {
     F4NCGB_TIME(sym_pre);
 
@@ -606,9 +547,7 @@ struct f4 {
     todo_seen.clear();
     idxs_spol.clear();
     idxs_red.clear();
-    // Matrices grow from one iteration to the next, so the last one is a much
-    // better guess than a constant: serre-e6-17 ends at 21.7 M columns, which
-    // starting from 2^16 reaches through nine rehashes of todo_seen.
+
     const size_t guess = std::max<size_t>(1L << 16, last_columns);
     columns.reserve(guess);
     todo_seen.reserve(guess);
@@ -617,11 +556,6 @@ struct f4 {
     // polynomial to be reduced in reduce_mode
     const size_t staged_spolies = spolies.size();
 
-    /// Slot of `m`, queueing it for a reducer search the first time it is seen.
-    ///
-    /// Slots are column indices, which are uint32_t everywhere. Checking after
-    /// the push catches the overflow one column before the cast above could
-    /// wrap, and only costs a comparison per column rather than per nonzero.
     auto touch = [&](mon_id m) {
       auto [it, inserted]
         = todo_seen.try_emplace(m, static_cast<uint32_t>(columns.size()));
@@ -654,9 +588,6 @@ struct f4 {
           ai, static_cast<int>(poly.get_idx(lm_to_poly[i])), ci);
     };
 
-    // The staged rows come first in `spolies`, so their columns have to be
-    // recorded first. The two loops never both do anything -- a caller that
-    // stages rows has no critical pairs -- so this does not reorder anything.
     for(size_t i = 0; i < staged_spolies; i++)
       emit_row(idxs_spol, poly[spolies[i]]);
 
@@ -668,7 +599,6 @@ struct f4 {
       auto mons_f = poly[f];
       auto mons_g = poly[g];
 
-      // a pivot column, deliberately not queued for a reducer search
       mon_id lm = mons_f[0];
       bool first_time
         = todo_seen.try_emplace(lm, static_cast<uint32_t>(columns.size()))
@@ -693,9 +623,6 @@ struct f4 {
     }
     crit_pairs.clear();
 
-    // `columns` grows as reducers are emitted, which is what drains the queue.
-    // The pivot slots were recorded in ascending order, so one cursor skips
-    // them.
     size_t next_pivot = 0;
     for(size_t slot = 0; slot < columns.size(); slot++) {
       if(next_pivot < pivot_slots.size() and pivot_slots[next_pivot] == slot) {
@@ -718,37 +645,8 @@ struct f4 {
   //------------------------------------------------------------------------------
   poly_id find_reducer(mon_id m) {
     // Strategy: the reducer with the fewest terms, ties going to the smallest
-    // leading monomial and then to the last occurrence. Stating it here rather
-    // than leaning on the order the trie happens to report in keeps the choice
-    // -- and with it the whole basis -- independent of how the search works.
-    //
-    // Term count, not leading monomial, because the tail of the reducer is what
-    // everything downstream pays for twice. Symbolic preprocessing chases it --
-    // each of its terms becomes a column needing a reducer of its own, and so
-    // on -- and then the elimination subtracts it once per column it reduces.
-    // So a short reducer both shrinks the closure and thins the arithmetic over
-    // it, which is why the benchmarks that are all elimination move the most:
-    // braid3-16 goes from 53.4 s to 14.3 s, its Gauss elimination from 50.9 s
-    // to 12.0 s against a closure that only shrank 17 % (1502520 reducer rows
-    // to 1241170). Where the closure is what dominates, lascala_neuh-13 loses
-    // 41 % of it (673071 rows to 395805) and 41 % of its runtime.
-    //
-    // Where neither shrinks -- serre-ha11-17 moves by 0.01 % -- this has to be
-    // free, which is why the count rides in on the trie rather than being
-    // looked up. Going through lm_to_poly and the polynomial pool behind it,
-    // one hash probe and one random read per candidate, cost that benchmark
-    // 13 % and paid for nothing.
-    //
-    // It is not free in memory on the examples that intern the most: the
-    // monomials it reaches differ from the old ones, and serre-e6-17 gives back
-    // the 1.3 GB that sizing the column containers saved, ending where it
-    // started at 6.3 GB.
-    //
-    // The trie only offers the shortest word ending at each position. Under the
-    // old rule that cost nothing, since no shorter word can end where the
-    // smallest divisor does. Under this one it is a genuine restriction: a
-    // longer word ending at the same position may have fewer terms. It stays
-    // because the point is a cheap reducer, not the cheapest one.
+    // leading monomial and then to the last occurrence.
+    
     std::pair<mon_id, size_t> match{ 0, 0 };
     uint32_t best_terms = 0;
     prefix_trie.for_each_shortest_divisor(
@@ -778,20 +676,12 @@ struct f4 {
     if(state.proof_level > 0)
       extended_reducers.emplace_back(a, static_cast<int>(poly.get_idx(g)), b);
 
-    // a * lm(g) * b is m by construction -- that is what made g a reducer for
-    // it -- so the product does not need to look its own leading monomial up.
     poly_id res = poly.multiply_front_and_back(a, g, b, m);
 
     return res;
   }
 
   //------------------------------------------------------------------------------
-  /// Divides a cofactor list and its denominator by what they have in common.
-  ///
-  /// Without this the denominators multiply up through the iterations, since
-  /// every expansion folds in the ones of everything it substitutes -- they
-  /// reach tens of digits within ten iterations of braid3-16 alone, and the
-  /// coefficients carry them.
   static void cancel_common_factor(std::vector<cofactor>& cf, coeff& denom) {
     if(cf.empty())
       return;
@@ -811,7 +701,7 @@ struct f4 {
   void log_cofactors() {
 
     // The new elements are still stored unnormalized, so their cofactors are
-    // too. See cofactor_denom.
+    // too.
     cofactor_denom.resize(cofactors.size());
     for(size_t n = basis.size(); n < cofactors.size(); n++)
       cofactor_denom[n]
@@ -955,8 +845,8 @@ struct f4 {
       tmp.push_back(vec[i]);
     vec.swap(tmp);
   }
+  //------------------------------------------------------------------------------
 
-  /// Row-wise permutation of a CSR block, to match apply_perm() on the rows.
   void apply_perm(csr_indices& idxs, const std::vector<size_t>& perm) {
     assert(idxs.rows() == perm.size());
     csr_scratch.clear();
@@ -978,19 +868,10 @@ struct f4 {
   std::vector<uint32_t> lm_col;
 
   /// Sorts the rows by leading column, then by support.
-  ///
-  /// `idxs` is permuted along with them, unless `order` is given: then the CSR
-  /// is left in discovery order and the caller receives the permutation to read
-  /// through instead. That trade -- an indirection per row against a copy of
-  /// every nonzero -- only pays for a block that is read once. The reducer block
-  /// is; the s-polynomial block is rebuilt for every prime, so it is cheaper to
-  /// move its nonzeros once than to chase the order 177 times over.
   void sort_rows(std::vector<poly_id>& to_sort,
                  std::vector<triplet>& extended,
                  csr_indices& idxs,
                  std::vector<size_t>* order = nullptr) {
-    // sort rows (+ extended_rows accordingly)
-    // first by lm (smaller first), then by support (smaller first)
 
     size_t m = to_sort.size();
     assert(idxs.rows() == m);
@@ -998,8 +879,6 @@ struct f4 {
     perm.resize(m);
     std::iota(perm.begin(), perm.end(), 0);
 
-    // A row's first column is its leading monomial, so the key the sort wants
-    // is already sitting at the front of its CSR entry.
     lm_col.resize(m);
     for(size_t i = 0; i < m; i++)
       lm_col[i] = idxs[i][0];
@@ -1029,25 +908,13 @@ struct f4 {
   csr_indices idxs_spol;
   std::vector<std::span<coeff>> entries_red;
   csr_indices idxs_red;
-  /// Bits per variable in the packed key, and how many of them fit in the 48
-  /// left over below the length.
-  ///
-  /// A variable index only needs as many bits as the variable count, not the
-  /// whole byte it is stored in. At one byte each only six fit, so on
-  /// serre-e6-17 -- six variables, monomials of degree up to 17 -- nearly every
-  /// pair of columns agreed on the encoded prefix and the sort fell through to
-  /// the full comparison, which chases two pointers into the monomial pool.
-  /// Three bits fit sixteen variables, which is the whole monomial on every
-  /// benchmark here.
+ 
   size_t key_bits = 8;
   size_t key_packed = 6;
 
-  /// Length and leading variables of a monomial, packed so that comparing the
-  /// two integers agrees with the monomial order. Equal keys decide nothing and
-  /// fall back to the full comparison.
-  ///
-  /// Only valid for the plain degree order: a block order ranks by per-block
-  /// degrees, which this does not capture.
+  // Length and leading variables of a monomial, packed so that comparing the
+  // two integers agrees with the monomial order. Equal keys fall back to the 
+  // full comparison. Only valid for deglex.
   inline uint64_t sort_key(mon_id m) const {
     const monomial v = mons[m];
 
@@ -1061,28 +928,18 @@ struct f4 {
       key |= static_cast<uint64_t>(v[i]) << (48 - key_bits * (i + 1));
     return key;
   }
+  //------------------------------------------------------------------------------
 
   std::vector<std::pair<uint64_t, uint32_t>> keyed_columns;
   std::vector<uint32_t> slot_to_col;
   std::vector<mon_id> sorted_columns;
-  /// Puts the columns collected by symbolic_preprocessing() in DESCENDING
-  /// order, and fills slot_to_col with where each slot ended up.
-  ///
-  /// The result does not depend on the order the slots were handed out in: the
-  /// comparator is a total order on distinct monomials, and a monomial gets
-  /// exactly one slot.
   void sort_columns() {
     const size_t n = columns.size();
 
-    // Sorting on the packed key keeps the comparator out of the monomial pool:
-    // it would otherwise chase two random pointers per comparison, of which
-    // there are O(n log n).
     keyed_columns.clear();
     keyed_columns.reserve(n);
     for(uint32_t s = 0; s < n; s++) {
       uint64_t key = 0;
-      // A block order ranks by per-block degrees, which the packed key cannot
-      // express, so there it stays constant and every comparison falls through.
       if constexpr(!block_order)
         key = sort_key(columns[s]);
       keyed_columns.emplace_back(key, s);
@@ -1113,9 +970,6 @@ struct f4 {
     sort_columns();
     state.nr_cols = columns.size();
 
-    // Renumber the rows from slots to columns. One array lookup per nonzero,
-    // where reading the column out of a monomial-keyed hash table used to cost
-    // a probe.
     for(auto& c : idxs_spol.data)
       c = slot_to_col[c];
     for(auto& c : idxs_red.data)
@@ -1123,15 +977,6 @@ struct f4 {
 
     // sort spolies and reducers
     sort_rows(spolies, extended_spolies, idxs_spol);
-    // Sorting the reducers looks skippable -- they are only ever reached
-    // through red_pivots[column], so their order does not enter the result, and
-    // dropping it saves a third of the matrix building on serre-e6-17. It is
-    // not: the elimination walks columns upwards, so ordering the rows by pivot
-    // is what makes it read red_mat front to back instead of at random.
-    // Leaving them in discovery order costs braid3-16 2.7x (51 s of Gauss
-    // elimination becomes 142 s). What it does not need is for the nonzeros to
-    // be moved: red_order carries the order down to set_up_reducer_mat, which
-    // has to copy them into the reducer matrix anyway.
     sort_rows(reducers, extended_reducers, idxs_red, &red_order);
 
     // collect entries
@@ -1190,8 +1035,9 @@ struct f4 {
         mon_id m_id = poly.get_lm_id(p_id);
         lm_to_poly[m_id] = p_id;
 
-        // update tries. The term count rides along so that find_reducer() can
-        // rank a candidate without going back to the polynomial for it.
+        // update tries. The term count is also included so that 
+        // find_reducer() can rank a candidate without going back 
+        // to the polynomial for it.
         monomial m = mons[m_id];
         prefix_trie.insert(m, m_id, poly.get_length(p_id));
         suffix_trie.insert_rev(m, m_id);

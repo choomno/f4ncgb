@@ -8,10 +8,6 @@
 
 namespace f4ncgb {
 
-/// Writing polynomials back out in msolve syntax. The parser is needed only for
-/// the names the variables were read under.
-
-/// The variable names, one line per block, then the characteristic.
 inline std::ostream&
 write_header(std::ostream& o,
              parser_context& names,
@@ -19,8 +15,6 @@ write_header(std::ostream& o,
   for(auto& b : opts.blocks) {
     for(auto v : b) {
       names.var_to_ostream(o, v);
-      // Variables are numbered in the order they were read, so the last one
-      // printed is num_vars and every earlier one is followed by a separator.
       if(v < opts.num_vars)
         o << ",";
     }
@@ -48,8 +42,6 @@ write_monomial(std::ostream& o,
   return o;
 }
 
-/// Coefficients are printed relative to `reduce_denom`, or to the leading
-/// coefficient when that is null.
 template<class PS>
 std::ostream&
 write_polynomial(std::ostream& o,
@@ -104,7 +96,6 @@ write_polynomial(std::ostream& o,
   return o;
 }
 
-/// Header plus every polynomial of the store: the whole problem, re-read.
 template<class PS>
 std::ostream&
 write_all(std::ostream& o,

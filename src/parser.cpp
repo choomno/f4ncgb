@@ -40,9 +40,6 @@ isdigit_(char c) {
   return c >= '0' && c <= '9';
 }
 
-/// Numbers are read into fixed-width integers, so one that does not fit has to
-/// be rejected rather than silently wrapped. Check after every read that could
-/// have seen user digits.
 #define EXPECT_NO_OVERFLOW()                          \
   do {                                                \
     if(number_overflow_) {                            \
@@ -83,9 +80,6 @@ isdigit_(char c) {
   c = getc();   \
   EXPECT(C);
 
-/// The callback is allowed to reject what it is handed -- a variable outside
-/// the declared range, for one -- so its answer has to travel back out of the
-/// parser rather than being dropped.
 #define ADD(V)                                          \
   do {                                                  \
     if(parse_res add_err_ = add_cb(add_cb_userdata, V)) \
@@ -186,11 +180,6 @@ parser_context::impl_msolve(parse_add_cb add_cb,
           EXPECT_DIGIT();
           size_t sup = read_positive_int();
           EXPECT_NO_OVERFLOW();
-          // A monomial's length is kept in 32 bits by the store, so that is
-          // the real bound on an exponent -- the limit of 1000 that used to be
-          // here was arbitrary. Anything near this ceiling runs the store out
-          // of room while the monomial is being built, which is reported as an
-          // error of its own rather than silently truncated.
           if(sup > std::numeric_limits<uint32_t>::max()) {
             return "Exponent too high";
           }
@@ -374,8 +363,6 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
   return std::nullopt;
 }
 
-/// The number of variables and of blocks was already given in the header line;
-/// this reads which variables each block holds.
 template<parser_symbolic_context::id (*getV)(parser_context&)>
 parse_res
 parser_context::read_blocks() {
@@ -405,10 +392,6 @@ parser_context::impl_poly_gen(parse_add_cb add_cb,
                               void* add_cb_userdata,
                               parse_monomial_boundary_cb boundary_cb,
                               void* boundary_cb_userdata) {
-  // The blocks were read with the header, so this starts at the polynomials.
-  // Each polynomial is separated by a 0, with each monomial within a polynomial
-  // being separated by a +. Negative coefficients are always separated using a
-  // + and then just start with a -.
 
   while(c != EOF) {
     parser_symbolic_context::id v;
@@ -594,12 +577,6 @@ parser_context::parse_header(solve_options& opts) {
   EXPECT('\n');
   getc();// Swallow the newline.
 
-  // The blocks come next in the file. They belong to the header even though
-  // they are on their own lines: monomial_store::set_blocks() turns them into
-  // the monomial order before a single polynomial is read, and the polynomials
-  // are sorted by that order as they are parsed. Read with the body instead --
-  // where they used to be -- and every block is still empty at that point, so
-  // the order silently degrades to a plain lexicographic one.
   if(auto err = symbolic_vars
                   ? read_blocks<&parser_context::read_symbolic_var>()
                   : read_blocks<&parser_context::read_numeric_var>())

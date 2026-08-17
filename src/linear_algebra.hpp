@@ -22,12 +22,6 @@ typedef sparse_mat_t<uint32_t> uint32_mat_t;
 typedef sparse_mat_ro_t<uint32_t> uint32_mat_ro_t;
 using pivots = std::vector<size_t>;
 
-/// Stops a nonzero count from wrapping the offset type, which would not be
-/// noticed downstream: an offset that wraps still yields the right row length,
-/// because that is a difference of two of them, but points at the wrong row.
-///
-/// Compiles away entirely when the offsets are as wide as a size_t, and is
-/// called once per row at the most -- never per nonzero.
 inline void
 check_offset(size_t value, const char* what) {
   if constexpr(sizeof(mat_offset_t) < sizeof(size_t)) {
@@ -44,10 +38,6 @@ check_offset(size_t value, const char* what) {
   }
 }
 
-/// Same, for the counts that bound a matrix's dimensions rather than its
-/// nonzeros. WIDE_MATRIX_OFFSETS does not move these: column indices are
-/// uint32_t everywhere and the two pivot arrays hold a row as an int32_t, and a
-/// matrix that wide or that tall is out of reach for other reasons.
 inline void
 check_fits(size_t value, size_t limit, const char* what) {
   if(value > limit)
@@ -55,13 +45,12 @@ check_fits(size_t value, size_t limit, const char* what) {
       21, "%s reached %zu, past the %zu this can address.", what, value, limit);
 }
 
-/// Column indices of a sparse matrix, one flat array instead of a vector per
-/// row: row i is [row_start[i], row_start[i + 1]) of `data`.
+// Column indices of a sparse matrix: 
+// row i is [row_start[i], row_start[i + 1]) of `data`.
 struct csr_indices {
   std::vector<uint32_t> data;
   std::vector<mat_offset_t> row_start{ 0 };
 
-  /// Keeps the capacity, which is the point of reusing this across iterations.
   void clear() {
     data.clear();
     row_start.assign(1, 0);
@@ -79,10 +68,6 @@ struct csr_indices {
   }
 };
 
-/// `red_order` is the row order of the reducer block: its CSR is still in
-/// discovery order, and row i of the reducer matrix is idxs_red[red_order[i]].
-/// The s-polynomial CSR is already in row order -- it is re-read for every
-/// prime, so its nonzeros are cheaper moved once than chased repeatedly.
 std::pair<std::vector<std::pair<size_t, size_t>>, fmpz*>
 linear_algebra(const solve_state& state,
                const csr_indices& idxs_spol,

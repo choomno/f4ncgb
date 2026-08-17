@@ -21,10 +21,6 @@ namespace f4ncgb {
 using parse_res = std::optional<std::string>;
 using parse_add_cb = std::add_pointer<parse_res(void*, uint32_t)>::type;
 
-// Also gives the coefficent of the monomial as either a rational or an integer.
-// The bool is true if it is a rational number. The first long is the numerator,
-// the second long is the denominator. If integer, the denominator is
-// always 1.
 using parse_monomial_boundary_cb
   = std::add_pointer<parse_res(void*, long, long, bool)>::type;
 
@@ -76,9 +72,6 @@ class parser_context {
                         parse_monomial_boundary_cb boundary_cb,
                         void* boundary_cb_userdata);
 
-  /// Reads the variable blocks that follow the header line of the poly and
-  /// sympoly formats. Part of the header rather than of the body, because the
-  /// monomial order is built out of the blocks and the body is sorted by it.
   template<parser_symbolic_context::id (*getV)(parser_context&)>
   parse_res read_blocks();
 
@@ -126,13 +119,9 @@ class parser_context {
 
   inline void ungetc(int c) { ::ungetc(c, f.get()); }
 
-  /// Set when a number in the input did not fit. The readers cannot report an
-  /// error themselves -- they return the number -- so the parsers check this
-  /// through EXPECT_NO_OVERFLOW() once they are back on a path that can fail.
+  // Set when a number in the input did not fit
   bool number_overflow_ = false;
 
-  /// Reads digits into `num`, flagging an overflow rather than wrapping.
-  /// `limit` is the largest value the caller can still use.
   inline size_t read_digits(size_t limit) {
     assert(c >= '0' && c <= '9');
     size_t num = 0;
@@ -230,8 +219,6 @@ class parser_context {
   parser_context() = default;
   ~parser_context() = default;
 
-  /// The options the header is read into. Set for the duration of
-  /// parse_header(), which is the only thing that writes them.
   solve_options* opts_ = nullptr;
 
   std::function<parse_res(parse_add_cb add_cb,
@@ -251,7 +238,6 @@ class parser_context {
 
   bool has_symbols() const { return static_cast<bool>(symbols); }
 
-  /// Reads the header of the opened file into `opts`.
   parse_res parse_header(solve_options& opts);
 
   const std::string& get_filename() const { return filename; }
@@ -295,11 +281,8 @@ parse(parser_context& ctx,
   return parse_rest(ctx, add_cb, boundary_cb);
 }
 
-/// Appends the denominator cleared out of each polynomial to `input_denoms`.
-///
-/// Every route into the stores runs through here -- the three input formats and
-/// the C API, which replays what it was handed through the same callbacks -- so
-/// this is where a variable index is checked against the declared range.
+// Every route into the stores runs through here -- the three input formats and
+// the C API
 template<class PS>
 parse_res
 parse_rest_into_polynomial_store(parser_context& ctx,
@@ -318,12 +301,6 @@ parse_rest_into_polynomial_store(parser_context& ctx,
     = [&s, &input_denoms, &tmp_monomial, &tmp_polynomial, &tmp_denom, num_vars](
         uint32_t id) -> parse_res {
     if(id) {
-      // Variables are numbered 1..num_vars, and an index is used directly as an
-      // edge of the monomial tries and as a value within a monomial. Both are
-      // sized for exactly that range, so an index from outside it reads and
-      // writes past the end of them, and nothing downstream looks at it again.
-      // The width of `var` is chosen from num_vars in f4ncgb_main(), so this
-      // one bound also covers the narrowing on the next line.
       if(id > num_vars)
         return std::format("variable index {} is out of range, the problem "
                            "declares {} variables",

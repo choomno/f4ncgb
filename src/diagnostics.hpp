@@ -4,14 +4,7 @@
 #include <chrono>
 #include <cstddef>
 
-/// How the program reports to the user, and how it measures itself.
-///
-/// The reporting half is unconditional: die() is the error path for argument
-/// validation and msg() writes everything the user sees on stderr. The
-/// measuring half compiles out entirely when profiling is off, so nothing
-/// outside this header should name gstats -- go through the two macros.
-
-/// Level of output verbosity, ranges from 0 to 4
+// Level of output verbosity, ranges from 0 to 4
 extern int verbose;
 extern int msg_printing;
 
@@ -44,12 +37,8 @@ msg(const char* fmt, ...);
 namespace f4ncgb {
 #ifdef F4NCGB_ENABLE_PROFILING
 
-/// The statistics are global, so they are written by every elimination task and
-/// by every concurrent solve. Relaxed atomics keep that race-free; ordering
-/// does not matter for a counter nobody reads until the end.
 struct counter {
   std::atomic<size_t> value{ 0 };
-
   void operator++(int) { value.fetch_add(1, std::memory_order_relaxed); }
   operator size_t() const { return value.load(std::memory_order_relaxed); }
 };
@@ -63,6 +52,9 @@ struct accumulator {
 
 struct statistics {
   counter store_find_calls, store_find_hits;
+
+  std::chrono::time_point<std::chrono::steady_clock> start_time
+    = std::chrono::steady_clock::now();
 
   // Times
   accumulator init, other, new_elements;
@@ -81,8 +73,8 @@ struct statistics {
       if(!target)
         return;
 
-      // The addition is only carried out once! The destructor may be called
-      // multiple times.
+      // The addition is only carried out once! 
+      // The destructor may be called multiple times.
       std::chrono::time_point<std::chrono::high_resolution_clock> end
         = std::chrono::high_resolution_clock().now();
       std::chrono::duration<double> elapsed = end - start;

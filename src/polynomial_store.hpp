@@ -20,9 +20,6 @@ namespace internal {
 template<metadata_concept M, typename I>
 struct polynomial_metadata : public M {
   I coefficients;
-  /// Position in the basis, used for proof logging. Wide enough for any basis
-  /// the index type I can address, and free: the struct is padded to 12 bytes
-  /// either way.
   uint32_t idx;
 };
 
@@ -65,13 +62,11 @@ class polynomial_store
 
   size_t cpool_capacity_ = 0;
 
-  /// Two pools: the base class holds the monomial ids, cpool_ the coefficients.
+  // Two pools: the base class holds the monomial ids, cpool_ the coefficients.
   inline polynomial_store(monomial_store_& store)
     : base::store()
     , store_(store) {
     cpool_.reset(allocate_pool(capacity(), cpool_capacity_));
-    // allocate_pool() rounds up to whole huge pages, so never let the bound
-    // reach past what an id of type I can index.
     cpool_capacity_ = std::min(cpool_capacity_, capacity());
   }
 
@@ -83,7 +78,7 @@ class polynomial_store
     }
   }
 
-  /// Initialize a new polynomial. Remember to initialize the coefficents!
+  // Initialize a new polynomial. Remember to initialize the coefficents!
   inline std::tuple<metadata&, I*, C*> add(I length = 32) {
     auto [m, vv] = this->new_scratch(length);
     return std::tuple<metadata&, I*, C*>(
@@ -91,7 +86,7 @@ class polynomial_store
   }
   inline I commit() { return this->insert_scratch(); }
 
-  /// Consumes the coefficients of p, which is left holding zeros.
+  // Consumes the coefficients of p, which is left holding zeros.
   inline I add_polynomial(polynomial_vec& p) {
     if(p.size() > std::numeric_limits<typename base::length_type>::max()) {
       throw length_overrun_exception(
@@ -142,9 +137,6 @@ class polynomial_store
   }
 
   inline I get_lm_id(I id) const {
-    // discuss if polynomials are sorted
-    // increasing or decreasing -- decreasing
-    // is probably better
     return get_monomial_id(id, 0);
   }
 
@@ -164,12 +156,6 @@ class polynomial_store
   }
 
   private:
-  /// f * p * b, as a new polynomial sharing p's coefficient array: only the
-  /// monomials are built. A factor of 1 is passed as id 0, the empty monomial,
-  /// so one-sided products go through here too.
-  ///
-  /// The result is scratch -- real_size_ and cpool_size_ are rolled back -- so
-  /// it lives only until the next reset().
   template<bool have_lm>
   inline I multiply(I f, I p, I b, I known_lm) {
     assert(p != 0);
@@ -208,11 +194,7 @@ class polynomial_store
   inline I multiply_front_and_back(I f, I p, I b) {
     return multiply<false>(f, p, b, 0);
   }
-  /// Same product, with the leading monomial handed in rather than looked up.
-  /// Both callers pick p precisely because they already hold f * lm(p) * b, so
-  /// interning it again is a probe into the largest hash table in the program
-  /// that can only return the id the caller started from. It is a lookup that
-  /// always hits, never an insertion, so ids are assigned exactly as before.
+
   inline I multiply_front_and_back(I f, I p, I b, I known_lm) {
     return multiply<true>(f, p, b, known_lm);
   }
@@ -245,7 +227,7 @@ class polynomial_store
   }
 
   inline void new_entry(I id) {
-    // Commit the new coefficients to the coefficient array.
+    // commit the new coefficients to the coefficient array.
     metadata& m = this->get_metadata(id + 1);
     m.coefficients = cpool_size_;
     cpool_size_ += m.length;

@@ -28,7 +28,6 @@ class monomial_store
   store_tracer tracer_ = store_tracer("monomial_store");
 #endif
 
-  /// Interns monomials: maps the variables to the id they were stored under.
   boost::unordered_flat_map<std::span<const V>,
                             I,
                             boost::hash<std::span<const V>>,
@@ -36,19 +35,7 @@ class monomial_store
     map_;
 
   protected:
-  /// Interning is the largest single cost of a run and it is bound by memory
-  /// latency, not by hashing: the table reaches tens of millions of entries
-  /// (48 M on serre-e6-17, 5.5 GB resident) so every probe is a DRAM access.
-  /// Reserving it up front to remove all rehashing was measured at 2 % for an
-  /// extra gigabyte, and the two structural alternatives -- keying by id, or
-  /// caching products by their factors -- were both tried before and found
-  /// slower, since each adds an indirection or a second large table. Getting
-  /// past this needs fewer interned monomials, not a faster table.
-  ///
-  /// What is left is to spend as few probes as possible. The base store does
-  /// not know about the table, so the two functions below keep it up to date
-  /// themselves rather than through a new_entry() hook -- which is what lets
-  /// get_product_id() settle insert-or-found in a single probe.
+  
   std::optional<I> find(const std::span<const V>& v) const {
     F4NCGB_PROFILE(gstats.store_find_calls++);
     if(v.size() == 0)
@@ -62,9 +49,6 @@ class monomial_store
     return it->second + 1;
   }
 
-  /// Commits what sits at the scratch tip and records it. `scratch` has to be
-  /// that tip: insert_scratch() commits in place, so the bytes the key points
-  /// at are the ones that end up stored.
   inline I commit_scratch(const std::span<const V>& scratch) {
     const I id = base::scratch_id() - 1;
     const I res = base::insert_scratch();
@@ -72,10 +56,6 @@ class monomial_store
     return res;
   }
 
-  /// Deliberately not std::copy, which is a call into memmove: the runs here
-  /// are a handful of variables each and that call was 5 % of serre-e6-17. The
-  /// bound is what keeps the loop inline -- without it the compiler recognises
-  /// the idiom and puts the call back.
   static inline V* copy_values(const std::span<const V>& src, V* dst) {
     const size_t n = src.size();
     const V* s = src.data();
@@ -90,10 +70,6 @@ class monomial_store
 
   public:
   inline I getid(const std::span<const V>& v) {
-    // Looking before copying: most calls find the monomial already interned,
-    // and those need no scratch space at all. get_product_id() below has to
-    // write the monomial out before it can look it up, so it is the other way
-    // round there.
     if(const auto id = find(v))
       return *id;
 
@@ -107,22 +83,15 @@ class monomial_store
     return getid(s);
   }
 
-  /// Id of a*b*c. Absent factors are passed as id 0, the empty monomial, so
-  /// this covers products of two as well.
   inline I get_product_id(I a, I b, I c = 0) {
     return get_product_id((*this)[a], b, (*this)[c]);
   }
 
-  /// Same product with the outer factors handed in as values. multiply() holds
-  /// both of them fixed for a whole polynomial, so resolving them once there
-  /// keeps this off two pieces of metadata that cannot have changed.
   inline I get_product_id(const std::span<const V>& a,
                           I b,
                           const std::span<const V>& c) {
     const std::span<const V> b_v = (*this)[b];
     const size_t length_combined = a.size() + b_v.size() + c.size();
-    // Reachable: a basis polynomial may carry a constant term, and 1*1*1 is the
-    // empty monomial, which is id 0 and is never in the table.
     if(length_combined == 0)
       return 0;
     if(length_combined
@@ -138,9 +107,6 @@ class monomial_store
     it = copy_values(b_v, it);
     copy_values(c, it);
 
-    // The product has to be written out to be looked up either way, so unlike
-    // getid() this can go straight for try_emplace and pay one probe whether
-    // the product is new or not.
     F4NCGB_PROFILE(gstats.store_find_calls++);
     auto [entry, inserted]
       = map_.try_emplace(std::span<const V>(vv, length_combined),
@@ -186,11 +152,6 @@ class monomial_store
       auto a_it = (*this)[a];
       auto b_it = (*this)[b];
 
-      // Counts the variables of both monomials per block on every comparison,
-      // so sorting under a block order costs O(blocks * length) per compare
-      // where the plain order costs a length lookup. Caching the per-block
-      // degrees in the metadata would fix that; no benchmark uses a block
-      // order, so the cost is recorded rather than guessed at.
       for(size_t i = 0; i < Nblocks; i++) {
         size_t n = Nblocks - i;
         la = (size_t)std::ranges::count_if(
@@ -211,12 +172,6 @@ class monomial_store
     }
 
     // compare monomials lexicographically
-    //
-    // Deliberately not memcmp: that compares the byte representation, which
-    // only coincides with the order of the variables while V is a single byte.
-    // For V = uint16_t on a little-endian host it would order the variables by
-    // (v & 0xff, v >> 8) instead of by v. It also lets the two monomials differ
-    // in length, which the block order does not otherwise guarantee.
     auto a_it = (*this)[a];
     auto b_it = (*this)[b];
 

@@ -21,7 +21,6 @@
 #endif
 
 #ifdef F4NCGB_ENABLE_SIGNAL
-// libc++ pulls this in through one of the headers above, libstdc++ does not.
 #include <csignal>
 #endif
 
@@ -82,7 +81,6 @@ main(int argc, char** argv) {
   signal(SIGUSR1, handle_signal);
 #endif
 
-  // clang-format off
   po::options_description desc("f4ncgb, version " F4NCGB_VERSION "\n"
                                "Copyright(C) 2025 Clemens Hofstadler, Maximilian Heisinger\n"
                                "JKU Linz, Austria\n"
@@ -106,7 +104,6 @@ main(int argc, char** argv) {
 
   po::positional_options_description positional_desc;
   positional_desc.add("input", 1);
-  // clang-format on
 
   po::variables_map vm;
   po::store(po::command_line_parser(argc, argv)
@@ -179,15 +176,13 @@ main(int argc, char** argv) {
   opts.proof_file = proof_file;
   opts.reduce = reduce;
 
-  // The stores throw when they run out of room. Report that as an error rather
-  // than letting it reach std::terminate, which prints nothing useful.
   try {
     res = f4ncgb::f4ncgb_main(
       context,
       opts,
       { .output_name = output_name,
         .stats_print_function = &print_statistics_fun,
-        /* the process exits right after, so skipping teardown is safe */
+        // the process exits right after, so leaking memory is safe
         .leak_memory = true,
         .print_read_problem = print_problem });
   } catch(const std::exception& e) {

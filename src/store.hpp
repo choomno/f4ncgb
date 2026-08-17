@@ -15,9 +15,6 @@
 #include <utility>
 #include <vector>
 
-// The profiler shows boost::alignment to take a while, but this seems
-// to be an artifact from waiting for memory to appear. It makes no
-// difference if this is changed, so it will remain at this approch.
 #include <boost/align/align_down.hpp>
 #include <boost/align/align_up.hpp>
 
@@ -53,12 +50,10 @@ namespace f4ncgb {
 
 namespace internal {
 
-/// Pools are allocated in multiples of a huge page, so that the kernel can back
-/// them with one where that is supported.
+// Pools are allocated in multiples of a huge page
 constexpr size_t huge_page_size = 2097152;// 2^21, 2MB
 
-/// Largest pool the index type can address. Capped under AddressSanitizer,
-/// which cannot shadow an allocation of that size.
+// Largest pool the index type can address
 template<typename I, size_t element_size>
 consteval size_t
 addressable_capacity() {
@@ -76,15 +71,10 @@ addressable_capacity() {
                   absolute_max);
 }
 
-/// Reserves at least `capacity` bytes, aligned to a huge page. Falls back to
-/// ever smaller alignments when that fails, and reports what was actually
-/// taken -- which may be less than asked for, so callers have to bound
-/// themselves by `allocated` and not by what they requested.
+// Reserves at least `capacity` bytes, aligned to a huge page. Falls back to
+// ever smaller alignments when that fails
 inline std::byte*
 allocate_pool(size_t capacity, size_t& allocated) {
-  // Rounded up. Rounding down handed back a zero-byte pool for any store whose
-  // index type cannot address a whole huge page, which the small-index
-  // instantiations in the tests then wrote straight past.
   const size_t pages = (capacity + huge_page_size - 1) / huge_page_size;
 
   allocated = huge_page_size * pages;
@@ -166,8 +156,6 @@ is_power_of_two(size_t n) {
 template<typename T>
 concept value_concept = requires { is_power_of_two(sizeof(T)); };
 
-/// A store holds some instances of structures like [metadata, V_1, ...
-/// V_metadata.length].
 template<class B,
          metadata_concept M = metadata<>,
          value_concept V = uint8_t,
@@ -215,19 +203,11 @@ class store {
     alignof(M) >= alignof(V),
     "Alignment of M needs to be stricter, as elements are aligned this way.");
 
-  /// Metadata is never destroyed individually -- entries are variable-sized, so
-  /// there is no way to walk to the i-th one without walking all of them, and
-  /// the pool is freed in one piece. Nothing here has ever needed a metadata
-  /// type that owns anything, so this is asserted rather than worked around.
   static_assert(std::is_trivially_destructible_v<M>,
                 "Metadata must be trivially destructible: the pool is released "
                 "as a whole and entries are never destructed individually.");
 
   protected:
-  /// Ids and size_ count `unit`-sized slots, not bytes -- an entry always
-  /// starts at a multiple of alignof(M), so the low bits carry nothing. That is
-  /// what makes the whole pool reachable: at one id per byte an `I` of 32 bits
-  /// would stop at 4 GB, a quarter of what capacity() reserves.
   static constexpr size_t unit = alignof(M);
 
   consteval static size_t capacity() {
@@ -258,23 +238,16 @@ class store {
   I inserted_count_ = 0;
   M zero_metadata_;
 
-  /// Bytes an entry may actually occupy: what the allocator handed out, but
-  /// never more than an id of type `I` can reach. allocate_pool() rounds up to
-  /// whole huge pages and may also fall back to far less than requested, so
-  /// neither bound implies the other.
   size_t usable_ = 0;
 
   std::unique_ptr<std::byte[], pool_deleter> pool_;
 
-  /// Bytes an entry holding `space` values can take at worst: the metadata, the
-  /// padding in front of the values, the values, and the padding that aligns
-  /// the next entry.
   static constexpr size_t entry_bound(size_t space) {
     return sizeof(M) + alignof(V) + space * sizeof(V) + unit;
   }
 
-  /// Work on the current tip but do not commit anything. The tip can later be
-  /// committed using insert_scratch.
+  // Work on the current tip but do not commit anything. 
+  // The tip can later be committed using insert_scratch.
   inline std::pair<M&, V*> new_scratch(I space = 32) {
     if(static_cast<size_t>(size_) * unit + entry_bound(space) > usable_)
       throw monomial_store_overrun_exception();
@@ -318,10 +291,6 @@ class store {
     return id + 1;
   }
 
-  /// Called by insert_scratch() once an entry is committed, for derived stores
-  /// that keep something alongside the pool. Deliberately not the place to put
-  /// an index: monomial_store needs to decide insert-or-found before the entry
-  /// exists, which a post-commit hook cannot express.
   inline void new_entry(I id) { (void)id; }
 
   public:
@@ -341,9 +310,6 @@ class store {
       dump_to_binary();
     }
 #endif
-    // M is trivially destructible (asserted above), so freeing the pool is the
-    // whole teardown. Derived stores that own something per entry -- as
-    // polynomial_store does for its coefficients -- destroy it themselves.
   }
 
   inline M& get_metadata(I id) noexcept {
@@ -453,9 +419,6 @@ class store {
 
   pos_iterator begin() const { return pos_iterator(*this, 0); }
   pos_iterator end() const { return pos_iterator(*this, size_ + 1); }
-  /// Number of entries plus the 0 element. Walks the store, because entries are
-  /// variable-sized and inserted_count_ also counts the scratch polynomials
-  /// that polynomial_store::multiply() rolls back.
   size_t size() const { return (size_t)std::distance(begin(), end()); }
 
 #ifdef F4NCGB_ENABLE_STORE_DUMP

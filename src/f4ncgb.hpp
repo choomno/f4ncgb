@@ -125,7 +125,6 @@ class Solver {
   };
   std::unique_ptr<f4ncgb_handle, Deleter> handle_;
 
-  /// Every setter reports failure the same way: a message, or null on success.
   static void check(const char* msg) {
     if(msg)
       throw std::runtime_error(msg);
@@ -181,7 +180,6 @@ class Solver {
   using monomial = std::vector<uint32_t>;
   using polynomial = std::vector<std::tuple<coeff, coeff, monomial>>;
 
-  /// The C entry points, which solve() and reduce() differ only by.
   using entry_point = f4ncgb_result (*)(f4ncgb_handle*,
                                         void*,
                                         f4ncgb_add_cb,
@@ -202,7 +200,6 @@ class Solver {
   }
 
   private:
-  /// Hands the two std::functions to the C API as a pair of plain callbacks.
   f4ncgb_result run(entry_point entry, add_cb add, end_poly_cb end) {
     struct meta {
       add_cb a;
@@ -228,7 +225,6 @@ class Solver {
       handle_.get(), static_cast<void*>(&m), c_add_cb, c_end_poly_cb);
   }
 
-  /// Gathers what the callbacks report into one polynomial per end_poly.
   std::pair<f4ncgb_result, std::vector<polynomial>> collect(entry_point entry) {
     std::vector<polynomial> polys;
     bool create = true;

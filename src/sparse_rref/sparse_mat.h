@@ -5,28 +5,12 @@
 #include <cstdint>
 #include <utility>
 
-/// Offset into one of the flat arrays below. Unlike a row or a column index
-/// these count nonzeros, so they grow with the size of a matrix rather than
-/// with its dimensions, and 32 bits is not obviously enough forever:
-/// serre-e6-17, the densest benchmark here, reaches about 1.1e8 of them, which
-/// leaves a factor of 38.
-///
-/// Narrow by default all the same, because there is one of these per row and
-/// the reducer matrix has 21.5 M rows on that example -- widening them costs it
-/// 340 MB against a 6.3 GB run. Build with -DWIDE_MATRIX_OFFSETS=ON for
-/// problems that need more; every place that could overflow the narrow type
-/// checks and calls die() rather than wrapping, so the failure is never silent.
 #ifdef F4NCGB_WIDE_MATRIX_OFFSETS
 using mat_offset_t = uint64_t;
 #else
 using mat_offset_t = uint32_t;
 #endif
 
-/// The part of the reducer matrix that is the same for every prime: the row
-/// layout and the column indices. The coefficients are not here -- they change
-/// with the prime, and a batch of primes reduced at once needs one array each,
-/// so the caller owns those and passes them alongside. `unique_nnz` is how long
-/// such an array has to be.
 template<typename T>
 struct sparse_mat_ro_struct {
   ulong nrow;
@@ -34,14 +18,10 @@ struct sparse_mat_ro_struct {
   ulong trace_len;
   ulong unique_nnz;
 
-  /// Where row i starts in the caller's coefficient array, and in `indices`.
-  /// Both count nonzeros, hence mat_offset_t.
   mat_offset_t* row_start;
   mat_offset_t* index_start;
   uint32_t* row_nnz;
   uint32_t* indices;
-  /// Rows known to reduce to zero. Written by whichever prime discovers it,
-  /// read from a snapshot, hence the plain byte rather than bool.
   unsigned char* trace;
 };
 
@@ -78,8 +58,6 @@ sparse_mat_ro_init(sparse_mat_ro_t<T> ro,
   ro->unique_nnz = unique_nnz;
   ro->trace = NULL;
 
-  // Every pointer gets a value even when there is nothing to allocate:
-  // sparse_mat_ro_clear() frees all of them unconditionally.
   if(nrow > 0) {
     ro->row_start = s_malloc<mat_offset_t>(nrow);
     ro->index_start = s_malloc<mat_offset_t>(nrow);
@@ -162,8 +140,6 @@ sparse_mat_entry(sparse_mat_t<T> mat, ulong row, ulong col) {
   return sparse_vec_entry(sparse_mat_row(mat, row), col);
 }
 
-/// `values` is the coefficient array for the prime of interest; the matrix does
-/// not own one.
 template<typename T>
 void
 sparse_mat_print(const sparse_mat_ro_t<T> mat, const T* values) {

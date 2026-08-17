@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -38,8 +39,7 @@ die(int error_code, const char* fmt, ...) {
   exit(error_code);
 }
 
-// Everything below is the measuring half. This file is always compiled, so it
-// has to disappear along with the statistics it prints.
+// Everything below is the profiling.
 #ifdef F4NCGB_ENABLE_PROFILING
 
 namespace f4ncgb {
@@ -61,13 +61,10 @@ maximum_resident_set_size() {
 /*------------------------------------------------------------------------*/
 
 static double
-process_time() {
-  struct rusage u;
-  if(getrusage(RUSAGE_SELF, &u))
-    return 0;
-  double res = u.ru_utime.tv_sec + 1e-6 * u.ru_utime.tv_usec;
-  res += u.ru_stime.tv_sec + 1e-6 * u.ru_stime.tv_usec;
-  return res;
+wall_time() {
+  std::chrono::duration<double> elapsed
+    = std::chrono::steady_clock::now() - gstats.start_time;
+  return elapsed.count();
 }
 
 static double
@@ -81,8 +78,6 @@ percent_d(double a, double b) {
 }
 /*------------------------------------------------------------------------*/
 
-/// One "<label> <seconds> (<share of the total> %)" line. Labels are padded to
-/// the same width, sub-items are indented in the label itself.
 static void
 report(const char* label, double seconds, double total_time) {
   msg("%-27s%22.2f (%2.2f %%)", label, seconds, percent_d(seconds, total_time));
@@ -90,12 +85,12 @@ report(const char* label, double seconds, double total_time) {
 
 void
 statistics::print(size_t threads) {
-  auto total_time = process_time();
+  auto total_time = wall_time();
   statistics& s = gstats;
   msg("");
-  msg("maximum resident set size:  %22.2f MB",
+  msg("maximum resident set size: %22.2f MB",
       maximum_resident_set_size() / static_cast<double>((1 << 20)));
-  msg("store find calls:            %22zu", size_t(gstats.store_find_calls));
+  msg("store find calls:          %22zu", size_t(gstats.store_find_calls));
   msg("store find hits:           %22.2f %%",
       percent(s.store_find_hits, s.store_find_calls));
 
@@ -120,7 +115,7 @@ statistics::print(size_t threads) {
   report("construct new elements:", s.new_elements, total_time);
   report("other:", s.other, total_time);
   msg("");
-  msg("total process time:        %22.2f seconds", process_time());
+  msg("total wall time:           %22.2f seconds", wall_time());
 }
 }
 #endif

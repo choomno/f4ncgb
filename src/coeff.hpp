@@ -26,8 +26,6 @@ struct coeff {
     fmpz_set(value, other.value);
   }
 
-  /// Steals the limbs instead of deep-copying them, which matters for the big
-  /// numerators that come out of rational reconstruction.
   coeff(coeff&& other) noexcept {
     fmpz_init(value);
     fmpz_swap(value, other.value);
@@ -73,8 +71,6 @@ struct coeff {
     return *this;
   }
 
-  /// Exact, like the one above: the caller has to know the division comes out
-  /// even. FLINT does not check.
   coeff& operator/=(const coeff& b) {
     fmpz_divexact(value, value, b.value);
     return *this;
