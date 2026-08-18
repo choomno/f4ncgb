@@ -1,6 +1,7 @@
 #include "store_tracer.hpp"
 #include "zip_utils.hpp"
 #include <chrono>
+#include <cstdio>
 
 namespace f4ncgb {
 std::string store_tracer::prefix_ = "trace";
@@ -23,6 +24,6 @@ store_tracer::access(unsigned long i) {
     = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_)
         .count();
 
-  fprintf(file_.get(), "%lu %lu\n", i, stamp);
+  fprintf(file_.get(), "%lu %lld\n", i, static_cast<long long>(stamp));
 }
 }

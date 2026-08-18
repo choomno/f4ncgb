@@ -1,10 +1,13 @@
 #pragma once
 
 #include "coeff.hpp"
-#include "store.hpp"
+#include "options.hpp"
+#include "polynomial_store.hpp"
 
+#include <cstdio>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -18,10 +21,6 @@ namespace f4ncgb {
 using parse_res = std::optional<std::string>;
 using parse_add_cb = std::add_pointer<parse_res(void*, uint32_t)>::type;
 
-// Also gives the coefficent of the monomial as either a rational or an integer.
-// The bool is true if it is a rational number. The first long is the numerator,
-// the second long is the denominator. If integer, the denominator is
-// always 1.
 using parse_monomial_boundary_cb
   = std::add_pointer<parse_res(void*, long, long, bool)>::type;
 
@@ -74,6 +73,9 @@ class parser_context {
                         void* boundary_cb_userdata);
 
   template<parser_symbolic_context::id (*getV)(parser_context&)>
+  parse_res read_blocks();
+
+  template<parser_symbolic_context::id (*getV)(parser_context&)>
   parse_res impl_poly_gen(parse_add_cb add_cb,
                           void* add_cb_userdata,
                           parse_monomial_boundary_cb boundary_cb,
@@ -117,20 +119,29 @@ class parser_context {
 
   inline void ungetc(int c) { ::ungetc(c, f.get()); }
 
-  inline size_t read_positive_int() {
+  // Set when a number in the input did not fit
+  bool number_overflow_ = false;
+
+  inline size_t read_digits(size_t limit) {
     assert(c >= '0' && c <= '9');
     size_t num = 0;
     do {
-      num *= 10;
-      num += (static_cast<size_t>(c) - '0');
+      const size_t digit = static_cast<size_t>(c) - '0';
+      if(num > (limit - digit) / 10)
+        number_overflow_ = true;
+      else
+        num = num * 10 + digit;
       getc();
     } while(c >= '0' && c <= '9');
     return num;
   }
 
+  inline size_t read_positive_int() {
+    return read_digits(std::numeric_limits<size_t>::max());
+  }
+
   inline long read_positive_or_negative_int() {
     assert((c >= '0' && c <= '9') || c == '-' || c == '+');
-    long num = 0;
     bool neg = false;
     if(c == '-') {
       getc();
@@ -139,12 +150,10 @@ class parser_context {
       getc();
       neg = false;
     }
-    do {
-      num *= 10;
-      num += static_cast<long>(static_cast<size_t>(c) - '0');
-      getc();
-    } while(c >= '0' && c <= '9');
-    return num * (neg ? -1 : 1);
+    // -LONG_MIN has no counterpart, so the magnitude stops at LONG_MAX
+    const long num = static_cast<long>(
+      read_digits(static_cast<size_t>(std::numeric_limits<long>::max())));
+    return neg ? -num : num;
   }
 
   inline int swallow_whitespace_no_newline() {
@@ -210,38 +219,7 @@ class parser_context {
   parser_context() = default;
   ~parser_context() = default;
 
-  size_t maxdeg_ = UINT_MAX;
-  size_t maxiter_ = 10;
-  size_t num_blocks_ = 0;
-  size_t characteristic_ = 0;
-  size_t num_vars_ = 0;
-  size_t threads_ = 1;
-  size_t proof_level_ = 0;
-  bool tracer_ = true;
-  bool reduce_ = false;
-  std::string proof_file_ = "";
-  std::vector<std::vector<parser_symbolic_context::id>> blocks_;
-
-  size_t maxdeg() const { return maxdeg_; }
-  size_t maxiter() const { return maxiter_; }
-  size_t threads() const { return threads_; }
-  size_t proof_level() const { return proof_level_; }
-  bool tracer() const { return tracer_; }
-  const std::string& proof_file() const { return proof_file_; }
-  bool reduce() const { return reduce_; }
-
-  size_t num_blocks() const { return blocks_.size(); }
-  const std::vector<parser_symbolic_context::id>& block(size_t id) const {
-    assert(id < blocks_.size());
-    return blocks_[id];
-  }
-
-  std::vector<size_t> block_sizes() {
-    std::vector<size_t> res(blocks_.size());
-    for(size_t i = 0; i < blocks_.size(); i++)
-      res[i] = blocks_[i].size();
-    return res;
-  }
+  solve_options* opts_ = nullptr;
 
   std::function<parse_res(parse_add_cb add_cb,
                           void* add_cb_userdata,
@@ -259,10 +237,8 @@ class parser_context {
   }
 
   bool has_symbols() const { return static_cast<bool>(symbols); }
-  size_t characteristic() const { return characteristic_; }
-  size_t num_vars() const { return num_vars_; }
 
-  parse_res parse_header();
+  parse_res parse_header(solve_options& opts);
 
   const std::string& get_filename() const { return filename; }
 
@@ -271,101 +247,6 @@ class parser_context {
       return o << id_to_str(i);
     else
       return o << static_cast<int>(i);
-  }
-
-  std::ostream& to_msolve_header(std::ostream& o) {
-    for(auto& b : blocks_) {
-      for(auto v : b) {
-        var_to_ostream(o, v);
-        if(v < num_vars_)
-          o << ",";
-      }
-      o << "\n";
-    }
-    o << characteristic_ << "\n";
-    return o;
-  }
-
-  template<class MS>
-  std::ostream& to_msolve_mon(std::ostream& o,
-                              const MS& mons,
-                              typename MS::index_type mon_id,
-                              bool print_asterisk = false) {
-
-    // Print the monomial with '*' as needed
-    for(auto mon : mons[mon_id]) {
-      if(print_asterisk)
-        o << "*";
-      print_asterisk = true;
-      var_to_ostream(o, mon);
-    }
-    return o;
-  }
-
-  template<class PS>
-  std::ostream& to_msolve_poly(std::ostream& o,
-                               const PS& p,
-                               PS::index_type poly_id,
-                               bool first_poly,
-                               bool reduce = false) {
-    if(!first_poly)
-      o << ",\n";
-
-    // special case to print zero polynomial
-    if(poly_id == 0) {
-      o << "0";
-      return o;
-    }
-
-    const typename PS::monomial_store_& mons = p.get_monomial_store();
-    auto coeff_it = p.get_coefficients(poly_id).begin();
-    bool first = true;
-    const coeff& lc = reduce ? reduce_denom_c : *coeff_it;
-    rat_coeff rc;
-
-    for(const auto& mon_id : p[poly_id]) {
-
-      bool print_asterisk = false;
-      rc.update(*coeff_it, lc);
-
-      // print sign
-      if(!first)
-        o << (rc.sign() < 0 ? " - " : " + ");
-      else if(rc.sign() < 0)
-        o << "-";
-
-      // print coefficient if it's not ±1
-      if(!rc.is_unit()) {
-        o << rc.abs();
-        print_asterisk = true;
-      }
-      // print monomial
-      to_msolve_mon(o, mons, mon_id, print_asterisk);
-
-      // special case: empty monomial and coefficient ±1
-      if(mon_id == 0 && rc.is_unit()) {
-        o << "1";
-      }
-
-      first = false;
-      coeff_it++;
-    }
-
-    return o;
-  }
-
-  template<class PS>
-  std::ostream& to_msolve(std::ostream& o, const PS& p) {
-    to_msolve_header(o);
-
-    bool first_poly = true;
-    for(auto poly_it = p.begin() + 1u; poly_it != p.end(); ++poly_it) {
-      auto poly_id = *poly_it;
-      to_msolve_poly(o, p, poly_id, first_poly);
-      first_poly = false;
-    }
-    o << std::endl;
-    return o;
   }
 };
 
@@ -390,16 +271,24 @@ parse_rest(parser_context& ctx, AddCB add_cb, BoundaryCB boundary_cb) {
 
 template<typename AddCB, typename BoundaryCB>
 parse_res
-parse(parser_context& ctx, AddCB add_cb, BoundaryCB boundary_cb) {
-  parse_res err = ctx.parse_header();
+parse(parser_context& ctx,
+      solve_options& opts,
+      AddCB add_cb,
+      BoundaryCB boundary_cb) {
+  parse_res err = ctx.parse_header(opts);
   if(err)
     return err;
   return parse_rest(ctx, add_cb, boundary_cb);
 }
 
+// Every route into the stores runs through here -- the three input formats and
+// the C API
 template<class PS>
 parse_res
-parse_rest_into_polynomial_store(parser_context& ctx, PS& s) {
+parse_rest_into_polynomial_store(parser_context& ctx,
+                                 PS& s,
+                                 std::vector<coeff>& input_denoms,
+                                 size_t num_vars) {
 
   using monomial_store = PS::monomial_store_;
   using monomial_ref = PS::value_type;
@@ -408,9 +297,16 @@ parse_rest_into_polynomial_store(parser_context& ctx, PS& s) {
   std::vector<std::pair<coeff, monomial_ref>> tmp_polynomial;
   std::vector<long> tmp_denom;
 
-  auto add_cb = [&s, &tmp_monomial, &tmp_polynomial, &tmp_denom](uint32_t id) {
+  auto add_cb
+    = [&s, &input_denoms, &tmp_monomial, &tmp_polynomial, &tmp_denom, num_vars](
+        uint32_t id) -> parse_res {
     if(id) {
-      tmp_monomial.push_back(id);
+      if(id > num_vars)
+        return std::format("variable index {} is out of range, the problem "
+                           "declares {} variables",
+                           id,
+                           num_vars);
+      tmp_monomial.push_back(static_cast<var>(id));
     } else {
 
       coeff common_denom = 1;

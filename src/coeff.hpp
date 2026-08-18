@@ -26,6 +26,11 @@ struct coeff {
     fmpz_set(value, other.value);
   }
 
+  coeff(coeff&& other) noexcept {
+    fmpz_init(value);
+    fmpz_swap(value, other.value);
+  }
+
   coeff(long x) {
     fmpz_init(value);
     fmpz_set_si(value, x);
@@ -66,6 +71,11 @@ struct coeff {
     return *this;
   }
 
+  coeff& operator/=(const coeff& b) {
+    fmpz_divexact(value, value, b.value);
+    return *this;
+  }
+
   friend coeff operator+(const coeff& a, const coeff& b) {
     coeff r;
     fmpz_add(r.value, a.value, b.value);
@@ -81,6 +91,12 @@ struct coeff {
   friend coeff operator*(const coeff& a, const coeff& b) {
     coeff r;
     fmpz_mul(r.value, a.value, b.value);
+    return r;
+  }
+
+  friend coeff operator/(const coeff& a, const coeff& b) {
+    coeff r;
+    fmpz_divexact(r.value, a.value, b.value);
     return r;
   }
 
@@ -114,12 +130,16 @@ struct coeff {
     return r;
   }
 
-  void lcm_inplace(coeff& b) { fmpz_lcm(value, value, b.value); }
+  void lcm_inplace(const coeff& b) { fmpz_lcm(value, value, b.value); }
 
   void lcm_inplace(long b) {
     coeff tmp(b);
     lcm_inplace(tmp);
   }
+
+  void gcd_inplace(const coeff& b) { fmpz_gcd(value, value, b.value); }
+
+  bool is_one() const { return fmpz_is_one(value); }
 };
 
 struct rat_coeff {

@@ -1,14 +1,18 @@
+#include <cstdio>
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <stdexcept>
+#include <tuple>
 
-#include "fast_div.hpp"
 #include "f4ncgb.hpp"
-#include "store.hpp"
 #include "fuzztest/fuzztest.h"
 #include "fuzztest/internal/any.h"
-#include <gtest/gtest.h>
+#include "options.hpp"
 #include "parser.hpp"
+#include "solve.hpp"
+#include "store.hpp"
+#include <gtest/gtest.h>
 
 using namespace f4ncgb;
 using namespace fuzztest;
@@ -103,22 +107,24 @@ class fuzz_parser : public parser_context {
   const std::vector<polynomial>& polys;
 
   public:
+  /// The generated problem, in the form the solver expects it.
+  solve_options opts;
+
   fuzz_parser(
     const std::pair<std::vector<::block>, std::vector<polynomial>>& problem)
     : parser_context()
     , polys(problem.second) {
     auto& [blocks, polys] = problem;
-    this->characteristic_ = 0;
-    this->num_blocks_ = blocks.size();
-    this->num_vars_ = blocks_to_numvars(blocks);
-    this->blocks.resize(blocks.size());
+    opts.characteristic = 0;
+    opts.num_vars = blocks_to_numvars(blocks);
+    opts.blocks.resize(blocks.size());
     assert(polys.size() == this->polys.size());
     assert(polys.size() > 0);
     for(size_t i = 0; i < blocks.size(); ++i) {
-      this->blocks[i].resize(blocks[i].size());
+      opts.blocks[i].resize(blocks[i].size());
       std::transform(blocks[i].begin(),
                      blocks[i].end(),
-                     this->blocks[i].begin(),
+                     opts.blocks[i].begin(),
                      [](uint8_t e) -> uint32_t { return e; });
     }
 
@@ -166,30 +172,14 @@ fuzz_f4ncgb_main(
   }
 
   fuzz_parser ctx(problem);
-  size_t nvars = ctx.num_vars();
-  size_t nblocks = 0;
-  if(ctx.num_blocks() > 1)
-    nblocks = ctx.num_blocks();
+  ctx.opts.maxiter = maxiter;
+  ctx.opts.maxdeg = maxdeg;
 
-  int res
-    = f4ncgb_main(ctx, nblocks, nvars, 0, maxiter, maxdeg, 1, "", "");
+  int res = f4ncgb_main(ctx, ctx.opts, run_options{});
 }
 
 FUZZ_TEST(f4ncgb, fuzz_f4ncgb_main)
   .WithDomains(AnyProblem(), InRange(8, 1000), InRange(4, 10));
-
-void
-fuzz_ax_b_mod_p(uint32_t a, uint32_t x, uint32_t b) {
-  const uint32_t fast_res = mult_mod_2_31_1(a, b, x);
-  const uint32_t normal_res
-    = ((uint64_t)a * (uint64_t)x + (uint64_t)b) % 2'147'483'647;
-  assert(fast_res == normal_res);
-}
-
-FUZZ_TEST(f4ncgb, fuzz_ax_b_mod_p)
-  .WithDomains(InRange(0, 2'147'483'647),
-               InRange(0, 2'147'483'647),
-               InRange(0, 2'147'483'647));
 
 #ifdef __linux__
 void
@@ -197,13 +187,27 @@ fuzz_parser(std::string input) {
   int add_cb_count = 0;
   int boundary_cb_count = 0;
 
-  auto add_cb = [&add_cb_count](uint32_t i) { (void)i; if(add_cb_count++ > 1000000) throw std::runtime_error("too many ADDs"); return std::nullopt; };
-  auto boundary_cb = [&boundary_cb_count](long numerator, long denominator, bool is_rational) { (void) numerator; (void) denominator; (void) is_rational; if(boundary_cb_count++ > 1000000) throw std::runtime_error("too many BOUNDARYs"); return std::nullopt; };
+  auto add_cb = [&add_cb_count](uint32_t i) {
+    (void)i;
+    if(add_cb_count++ > 1000000)
+      throw std::runtime_error("too many ADDs");
+    return std::nullopt;
+  };
+  auto boundary_cb
+    = [&boundary_cb_count](long numerator, long denominator, bool is_rational) {
+        (void)numerator;
+        (void)denominator;
+        (void)is_rational;
+        if(boundary_cb_count++ > 1000000)
+          throw std::runtime_error("too many BOUNDARYs");
+        return std::nullopt;
+      };
 
-  FILE *f = fmemopen((void*)input.c_str(), input.size(), "r");
+  FILE* f = fmemopen((void*)input.c_str(), input.size(), "r");
 
   if(!f) {
-    std::cout << "Could not make a memory-backed file. Error: " << strerror(errno) << std::endl;
+    std::cout << "Could not make a memory-backed file. Error: "
+              << strerror(errno) << std::endl;
     exit(1);
   }
 
@@ -211,7 +215,7 @@ fuzz_parser(std::string input) {
 
   try {
     parse(ctx, add_cb, boundary_cb);
-  } catch(std::runtime_error &e) {
+  } catch(std::runtime_error& e) {
     EXPECT_LT(add_cb_count, 1000000);
     EXPECT_LT(boundary_cb_count, 1000000);
     FAIL() << e.what();

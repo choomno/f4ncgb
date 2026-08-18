@@ -1,8 +1,9 @@
 #pragma once
 
 #include <chrono>
-#include <string>
+#include <cstdio>
 #include <memory>
+#include <string>
 
 namespace f4ncgb {
 class store_tracer {

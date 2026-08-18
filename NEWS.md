@@ -1,3 +1,29 @@
+v1.1.0
+======
+
+## Improvements
+
+  - Mask for nonzero entries in Gaussian elimination
+  - Improvements to matrix setup
+  - Improvements to the symbolic preprocessing
+  - Improvements to the monomial trie data structure
+  - More fine-grained parallelisation of linear algebra
+
+## New Features
+
+  - The input is validated: a variable index outside `1..num_vars`, and a block
+    specification that does not cover the variables in order, are reported as
+    errors.
+  - Add CMake-option `WIDE_MATRIX_OFFSETS` for matrices with more than 2^32
+    nonzero entries. Off by default, in which case the counts that could overflow are
+    checked and the computation stops.
+
+## Fixes
+
+  - Fix for expanded cofactor representations
+  - Block orders were ignored for the `poly` format
+  - Degree bound was ignored for inclusion ambiguities 
+
 v1.0.1
 ======
 

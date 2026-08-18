@@ -7,7 +7,9 @@
 #include <boost/test/unit_test.hpp>
 
 #include "f4ncgb.hpp"
+#include "options.hpp"
 #include "parser.hpp"
+#include "polynomial_store.hpp"
 
 using namespace f4ncgb;
 
@@ -36,10 +38,13 @@ invoke_parser(parser_context& ctx,
   if(auto err = ctx.open(p); err) {
     return err;
   }
-  std::optional<std::string> err = ctx.parse_header();
+  solve_options opts;
+  std::optional<std::string> err = ctx.parse_header(opts);
   if(err)
     return err;
-  return parse_rest_into_polynomial_store(ctx, ps);
+  std::vector<coeff> input_denoms;
+  return parse_rest_into_polynomial_store(
+    ctx, ps, input_denoms, opts.num_vars);
 }
 
 BOOST_AUTO_TEST_CASE(parse_files) {

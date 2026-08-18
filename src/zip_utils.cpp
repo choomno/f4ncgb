@@ -1,7 +1,11 @@
 #include <cerrno>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 
 #include "zip_utils.hpp"

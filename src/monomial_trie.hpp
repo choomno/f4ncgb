@@ -1,6 +1,8 @@
 #ifndef MONOMIAL_TRIE_H
 #define MONOMIAL_TRIE_H
 
+#include <bit>
+#include <cassert>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -12,17 +14,27 @@ namespace f4ncgb {
 template<internal::value_concept V, typename I>
 struct monomial_trie {
   std::vector<uint64_t> nodes;
+  std::vector<std::vector<uint64_t>> entered_by;
   size_t child_size;
-
-  size_t size_in_bytes() const { return sizeof(uint64_t) * nodes.capacity(); }
 
   using match = std::pair<I, size_t>;
 
+  static constexpr uint64_t inverse_mod_2_64(uint64_t d) {
+    uint64_t x = 1;
+    for(int i = 0; i < 6; i++)
+      x *= 2 - d * x;
+    return x;
+  }
+
   monomial_trie(size_t n)
-    : child_size(n) {
-    nodes.reserve((child_size + 1) * 1024);
+    : entered_by(n + 1)
+    , child_size(n) {
+    const size_t node_size = child_size + 1;
+    node_shift_ = static_cast<size_t>(std::countr_zero(node_size));
+    node_inv_ = inverse_mod_2_64(node_size >> node_shift_);
+    nodes.reserve(node_size * 1024);
     // insert root
-    nodes.insert(nodes.end(), child_size + 1, 0);
+    nodes.insert(nodes.end(), node_size, 0);
   }
   // -----------------------------------------------------------------
 
@@ -42,52 +54,58 @@ struct monomial_trie {
   size_t size() { return nodes.size(); }
   // -----------------------------------------------------------------
 
-  void inline insert(const std::span<const V>& entry, I id) {
+  template<typename It>
+  size_t inline walk_creating(It first, It last) {
     size_t cur_idx = 0;
 
-    for(auto c : entry) {
+    for(It it = first; it != last; ++it) {
+      const auto c = *it;
       if(nodes[cur_idx + c] == 0) {
         nodes[cur_idx + c] = nodes.size();
         nodes.insert(nodes.end(), child_size + 1, 0);
+        entered_by[c].push_back(nodes[cur_idx + c]);
       }
       cur_idx = nodes[cur_idx + c];
     }
+
+    links_valid = false;
+    return cur_idx;
+  }
+  // -----------------------------------------------------------------
+
+  /// `weight` is carried through to for_each_shortest_divisor() untouched. It
+  /// lets find_reducer() rank a candidate without resolving it back to a
+  /// polynomial
+  void inline insert(const std::span<const V>& entry,
+                     I id,
+                     uint32_t weight = 0) {
+    const size_t cur_idx = walk_creating(entry.begin(), entry.end());
     assert(nodes[cur_idx] == 0);
     nodes[cur_idx] = id;
+    if(node_weight.size() < nodes.size())
+      node_weight.resize(nodes.size(), 0);
+    node_weight[cur_idx] = weight;
   }
   // -----------------------------------------------------------------
 
   void inline insert_rev(const std::span<const V>& entry, I id) {
-    size_t cur_idx = 0;
-
-    for(auto it = entry.rbegin(); it != entry.rend(); it++) {
-      auto c = *it;
-      if(nodes[cur_idx + c] == 0) {
-        nodes[cur_idx + c] = nodes.size();
-        nodes.insert(nodes.end(), child_size + 1, 0);
-      }
-      cur_idx = nodes[cur_idx + c];
-    }
-    nodes[cur_idx] = id;
+    nodes[walk_creating(entry.rbegin(), entry.rend())] = id;
   }
   // -----------------------------------------------------------------
 
   void inline clear() {
     nodes.resize(child_size + 1);
     std::fill(nodes.begin(), nodes.end(), 0);
+    node_weight.clear();
+    for(auto& nodes_of_var : entered_by)
+      nodes_of_var.clear();
+    links_valid = false;
   }
   // -----------------------------------------------------------------
 
+  // like insert(), but returns the id that was stored at that node before.
   I inline insert_chain(const std::span<const V>& entry, I id) {
-    size_t cur_idx = 0;
-
-    for(auto c : entry) {
-      if(nodes[cur_idx + c] == 0) {
-        nodes[cur_idx + c] = nodes.size();
-        nodes.insert(nodes.end(), child_size + 1, 0);
-      }
-      cur_idx = nodes[cur_idx + c];
-    }
+    const size_t cur_idx = walk_creating(entry.begin(), entry.end());
     I old_id = static_cast<I>(nodes[cur_idx]);
     nodes[cur_idx] = id;
     return old_id;
@@ -104,46 +122,38 @@ struct monomial_trie {
   }
   // -----------------------------------------------------------------
 
-  void inline collect_words(size_t idx,
-                            std::vector<match>& res,
-                            size_t depth) const {
-    uint64_t word = nodes[idx];
-    if(word != 0)
-      res.emplace_back(word, depth);
+  template<bool depth_grows>
+  void inline collect_words(size_t idx, std::vector<match>& res, size_t depth) {
+    walk_stack.clear();
+    walk_stack.emplace_back(idx, depth);
 
-    // Recursively visit all children
-    for(size_t i = idx + 1; i < idx + 1 + child_size; i++) {
-      uint64_t child_idx = nodes[i];
-      if(child_idx != 0)
-        collect_words(child_idx, res, depth);
-    }
-  }
-  // -----------------------------------------------------------------
-  void inline collect_words_adaptive(size_t idx,
-                                     std::vector<match>& res,
-                                     size_t depth) const {
+    while(!walk_stack.empty()) {
+      const auto [cur, d] = walk_stack.back();
+      walk_stack.pop_back();
 
-    uint64_t word = nodes[idx];
-    if(word != 0)
-      res.emplace_back(word, depth);
+      uint64_t word = nodes[cur];
+      if(word != 0)
+        res.emplace_back(word, d);
 
-    // Recursively visit all children
-    for(size_t i = idx + 1; i < idx + 1 + child_size; i++) {
-      uint64_t child_idx = nodes[i];
-      if(child_idx != 0)
-        collect_words_adaptive(child_idx, res, depth + 1);
+      for(size_t i = cur + child_size; i > cur; i--) {
+        uint64_t child_idx = nodes[i];
+        if(child_idx != 0)
+          walk_stack.emplace_back(child_idx, depth_grows ? d + 1 : d);
+      }
     }
   }
   // -----------------------------------------------------------------
   void inline inclusions(const std::span<const V>& word,
                          std::vector<match>& inclusions) {
+    if(word.empty())
+      return;
 
-    size_t end_idx;
-    for(size_t idx = 0; idx < nodes.size(); idx += child_size + 1) {
-      end_idx = starts_sequence(idx, word);
+    const std::span<const V> rest = word.subspan(1);
+    for(const uint64_t start : entered_by[word[0]]) {
+      size_t end_idx = starts_sequence(start, rest);
       if(end_idx == 0)
         continue;
-      collect_words_adaptive(end_idx, inclusions, 0);
+      collect_words<true>(end_idx, inclusions, 0);
     }
   }
 
@@ -170,9 +180,10 @@ struct monomial_trie {
           uint64_t child_idx = nodes[cur_idx + i];
           if(child_idx != 0) {
             assert(D >= d);
-            collect_words(child_idx,
-                          overlaps,
-                          static_cast<size_t>(D) - static_cast<size_t>(d));
+            collect_words<false>(child_idx,
+                                 overlaps,
+                                 static_cast<size_t>(D)
+                                   - static_cast<size_t>(d));
           }
         }
       }
@@ -204,20 +215,94 @@ struct monomial_trie {
 
   inline const std::vector<match>& get_prefixes(
     const std::span<const V>& word) {
-    divisors_res.clear();
-    prefixes(word, divisors_res, 0);
-    return divisors_res;
+    match_buffer.clear();
+    prefixes(word, match_buffer, 0);
+    return match_buffer;
   }
   // -----------------------------------------------------------------
 
-  inline const std::vector<match>& divisors(
-    const std::span<const V>& dividend) {
-    size_t D = dividend.size();
-    divisors_res.clear();
-    divisors_res.reserve(D);
-    for(size_t d = 1; d <= D; d++)
-      prefixes(dividend.last(d), divisors_res, D - d);
-    return divisors_res;
+  template<typename Visit>
+  void for_each_shortest_divisor(const std::span<const V>& dividend,
+                                 Visit visit) {
+    if(!links_valid)
+      build_links();
+    uint64_t cur = 0;
+    for(size_t pos = 0; pos < dividend.size(); pos++) {
+      const auto c = dividend[pos];
+
+      while(!nodes[cur + c] and cur != 0)
+        cur = fail_link[node_number(cur)];
+      cur = nodes[cur + c];
+
+      const word_ref w = min_word[node_number(cur)];
+      if(w.id)
+        visit(static_cast<I>(w.id), pos + 1 - w.len, w.weight);
+    }
+  }
+
+  // -----------------------------------------------------------------
+
+  void build_links() {
+    const size_t node_size = child_size + 1;
+    const size_t count = nodes.size() / node_size;
+
+    fail_link.assign(count, 0);
+    min_word.assign(count, word_ref{});
+    std::vector<uint64_t> dict_link(count, 0);
+    std::vector<uint32_t> node_depth(count, 0);
+
+    // breadth first, so that a node's failure link is known before its children
+    // need it. Nodes of depth 1 keep the defaults: they fall back to the root.
+    std::vector<uint64_t> queue;
+    queue.reserve(count);
+    for(size_t c = 1; c <= child_size; c++) {
+      const uint64_t child = nodes[c];
+      if(child) {
+        const size_t child_no = node_number(child);
+        node_depth[child_no] = 1;
+        // no proper suffix to fall back on, so the node's own word is all there
+        // can be
+        if(nodes[child])
+          min_word[child_no]
+            = { static_cast<I>(nodes[child]), 1, weight_of(child) };
+        queue.push_back(child);
+      }
+    }
+
+    for(size_t q = 0; q < queue.size(); q++) {
+      const uint64_t cur = queue[q];
+      const size_t cur_no = node_number(cur);
+
+      for(size_t c = 1; c <= child_size; c++) {
+        const uint64_t child = nodes[cur + c];
+        if(!child)
+          continue;
+        const size_t child_no = node_number(child);
+        const uint32_t depth = node_depth[cur_no] + 1;
+        node_depth[child_no] = depth;
+
+        // longest proper suffix of this node that is itself a node
+        uint64_t f = fail_link[cur_no];
+        while(!nodes[f + c] and f != 0)
+          f = fail_link[node_number(f)];
+        const uint64_t fl = nodes[f + c];
+        fail_link[child_no] = fl;
+
+        // nearest shorter suffix that is a stored word
+        const uint64_t dl = nodes[fl] ? fl : dict_link[node_number(fl)];
+        dict_link[child_no] = dl;
+
+        if(dl)
+          min_word[child_no] = min_word[node_number(dl)];
+        else if(nodes[child])
+          min_word[child_no]
+            = { static_cast<I>(nodes[child]), depth, weight_of(child) };
+
+        queue.push_back(child);
+      }
+    }
+
+    links_valid = true;
   }
   // -----------------------------------------------------------------
   void inline overlaps_and_inclusions(const std::span<const V>& word,
@@ -237,13 +322,39 @@ struct monomial_trie {
       for(size_t i = cur_idx + 1; i < cur_idx + 1 + child_size; i++) {
         uint64_t child_idx = nodes[i];
         if(child_idx)
-          collect_words(child_idx, overlaps, d);
+          collect_words<false>(child_idx, overlaps, d);
       }
     }
   }
 
   private:
-  std::vector<match> divisors_res;
+  std::vector<match> match_buffer;
+
+  std::vector<std::pair<uint64_t, size_t>> walk_stack;
+
+  size_t node_shift_ = 0;
+  uint64_t node_inv_ = 1;
+  size_t inline node_number(uint64_t idx) const {
+    return (idx >> node_shift_) * node_inv_;
+  }
+
+  // a stored word, its length, and whatever insert() attached to it
+  struct word_ref {
+    I id = 0;
+    uint32_t len = 0;
+    uint32_t weight = 0;
+  };
+
+  // Aho-Corasick state, by node number. `fail_link` is the longest proper
+  // suffix of a node that is a node itself; `min_word` is the shortest stored
+  // word that is a suffix of the word ending at the node
+  std::vector<uint64_t> fail_link;
+  std::vector<word_ref> min_word;
+  std::vector<uint32_t> node_weight;
+  uint32_t weight_of(uint64_t idx) const {
+    return idx < node_weight.size() ? node_weight[idx] : 0;
+  }
+  bool links_valid = false;
 };
 }
 

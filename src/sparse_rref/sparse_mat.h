@@ -2,20 +2,27 @@
 #define SPARSE_MAT_H
 
 #include "sparse_vec.h"
+#include <cstdint>
 #include <utility>
+
+#ifdef F4NCGB_WIDE_MATRIX_OFFSETS
+using mat_offset_t = uint64_t;
+#else
+using mat_offset_t = uint32_t;
+#endif
 
 template<typename T>
 struct sparse_mat_ro_struct {
   ulong nrow;
   ulong ncol;
   ulong trace_len;
+  ulong unique_nnz;
 
-  uint32_t* row_start;
-  uint32_t* index_start;
+  mat_offset_t* row_start;
+  mat_offset_t* index_start;
   uint32_t* row_nnz;
   uint32_t* indices;
-  T* entries;
-  bool* trace;
+  unsigned char* trace;
 };
 
 template<typename T>
@@ -32,7 +39,7 @@ using sparse_mat_t = struct sparse_mat_struct<T>[1];
 
 #define sparse_mat_row(mat, ind) ((mat)->rows + (ind))
 
-#define red_mat_entries(ro, ind) ((ro)->entries + (ro)->row_start[(ind)])
+#define red_mat_entries(ro, values, ind) ((values) + (ro)->row_start[(ind)])
 
 #define red_mat_indices(ro, ind) ((ro)->indices + (ro)->index_start[(ind)])
 
@@ -48,14 +55,19 @@ sparse_mat_ro_init(sparse_mat_ro_t<T> ro,
   ro->nrow = nrow;
   ro->ncol = ncol;
   ro->trace_len = 0;
+  ro->unique_nnz = unique_nnz;
+  ro->trace = NULL;
 
   if(nrow > 0) {
-    ro->row_start = s_malloc<uint32_t>(nrow);
-    ro->index_start = s_malloc<uint32_t>(nrow);
+    ro->row_start = s_malloc<mat_offset_t>(nrow);
+    ro->index_start = s_malloc<mat_offset_t>(nrow);
     ro->row_nnz = s_malloc<uint32_t>(nrow);
     ro->indices = s_malloc<uint32_t>(nnz);
-    ro->entries = s_malloc<T>(unique_nnz);
-    ro->trace = NULL;
+  } else {
+    ro->row_start = NULL;
+    ro->index_start = NULL;
+    ro->row_nnz = NULL;
+    ro->indices = NULL;
   }
 }
 
@@ -74,18 +86,17 @@ sparse_mat_ro_clear(sparse_mat_ro_t<T> ro) {
   s_free(ro->index_start);
   s_free(ro->row_nnz);
   s_free(ro->indices);
-  s_free(ro->entries);
   s_free(ro->trace);
   ro->nrow = 0;
   ro->ncol = 0;
   ro->trace_len = 0;
+  ro->unique_nnz = 0;
 
   ro->trace = NULL;
   ro->row_start = NULL;
   ro->index_start = NULL;
   ro->row_nnz = NULL;
   ro->indices = NULL;
-  ro->entries = NULL;
 }
 
 template<typename T>
@@ -109,15 +120,9 @@ sparse_mat_row_init(sparse_mat_t<T> mat, ulong i, ulong alloc) {
 template<typename T>
 inline void
 sparse_mat_init_trace(sparse_mat_ro_t<T> mat, ulong len) {
-  mat->trace = s_malloc<bool>(len);
+  mat->trace = s_malloc<unsigned char>(len);
   mat->trace_len = len;
-  std::fill(mat->trace, mat->trace + len, false);
-}
-
-template<typename T>
-inline void
-sparse_mat_reset_trace(sparse_mat_ro_t<T> mat) {
-  std::fill(mat->trace, mat->trace + mat->trace_len, false);
+  std::fill(mat->trace, mat->trace + len, (unsigned char)0);
 }
 
 template<typename T>
@@ -137,7 +142,7 @@ sparse_mat_entry(sparse_mat_t<T> mat, ulong row, ulong col) {
 
 template<typename T>
 void
-sparse_mat_print(const sparse_mat_ro_t<T> mat) {
+sparse_mat_print(const sparse_mat_ro_t<T> mat, const T* values) {
   for(unsigned long i = 0; i < mat->nrow; i++) {
     unsigned long idx_off = mat->index_start[i];
     unsigned long ent_off = mat->row_start[i];
@@ -146,7 +151,7 @@ sparse_mat_print(const sparse_mat_ro_t<T> mat) {
     unsigned long k = 0;
     for(unsigned long j = 0; j < mat->ncol; j++) {
       if(k < nnz && mat->indices[idx_off + k] == j) {
-        std::cout << mat->entries[ent_off + k] << " ";
+        std::cout << values[ent_off + k] << " ";
         k++;
       } else {
         std::cout << 0 << " ";
