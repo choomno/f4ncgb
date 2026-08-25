@@ -17,6 +17,7 @@
 
 #include "ambiguity.hpp"
 #include "coeff.hpp"
+#include "cofactors.hpp"
 #include "diagnostics.hpp"
 #include "f4ncgb.hpp"
 #include "linear_algebra.hpp"
@@ -178,6 +179,7 @@ struct f4 {
   std::vector<triplet> extended_reducers;
   std::vector<std::vector<cofactor>> cofactors;
   std::vector<coeff> cofactor_denom;
+  std::vector<size_t> window_start{ 1 };
   //------------------------------------------------------------------------------
   inline parse_res read_input(parser_context& context) {
     parse_res res
@@ -298,6 +300,9 @@ struct f4 {
             iter,
             basis.size() - 1);
     }
+
+    if(state.proof_level > 1)
+      write_expanded_proof();
   }
   //------------------------------------------------------------------------------
   void reduced_form() {
@@ -333,6 +338,9 @@ struct f4 {
     // perform reduction
     spolies.clear();
     spolies.push_back(p);
+    // p is the input polynomial thatinput.pop_back() removed
+    if(state.proof_level > 0)
+      extended_spolies.emplace_back(0, static_cast<int>(input.size()), 0);
     symbolic_preprocessing();
     reduction();
 
@@ -361,6 +369,9 @@ struct f4 {
 
     auto minimal_amb = amb.begin();
     size_t d = minimal_amb->first;
+
+    if(verbose > 1)
+      msg("Selected degree %d (%d ambiguities).", d, minimal_amb->second.size());
 
     crit_pairs.reserve(minimal_amb->second.size());
     for(const auto& a : minimal_amb->second) {
@@ -552,8 +563,6 @@ struct f4 {
     columns.reserve(guess);
     todo_seen.reserve(guess);
 
-    // rows the caller staged: the whole input during interreduction, the
-    // polynomial to be reduced in reduce_mode
     const size_t staged_spolies = spolies.size();
 
     auto touch = [&](mon_id m) {
@@ -587,6 +596,10 @@ struct f4 {
         extended_reducers.emplace_back(
           ai, static_cast<int>(poly.get_idx(lm_to_poly[i])), ci);
     };
+
+    // the two vectors have to line up, because sort_rows() permutes them together.
+    assert(state.proof_level == 0
+           or extended_spolies.size() == staged_spolies);
 
     for(size_t i = 0; i < staged_spolies; i++)
       emit_row(idxs_spol, poly[spolies[i]]);
@@ -682,22 +695,6 @@ struct f4 {
   }
 
   //------------------------------------------------------------------------------
-  static void cancel_common_factor(std::vector<cofactor>& cf, coeff& denom) {
-    if(cf.empty())
-      return;
-
-    coeff g = denom;
-    for(const auto& c : cf) {
-      g.gcd_inplace(c.c);
-      if(g.is_one())
-        return;
-    }
-
-    for(auto& c : cf)
-      c.c /= g;
-    denom /= g;
-  }
-  //------------------------------------------------------------------------------
   void log_cofactors() {
 
     // The new elements are still stored unnormalized, so their cofactors are
@@ -707,51 +704,22 @@ struct f4 {
       cofactor_denom[n]
         = *poly.get_coefficients(new_elements[n - basis.size()]).begin();
 
-    // compute expanded proofs
-    if(state.proof_level > 1 and basis.size() > 1) {
-      std::vector<cofactor> expanded;
-      for(size_t n = basis.size(); n < cofactors.size(); n++) {
-        expanded.clear();
+    // An expanded proof composes the whole transformation once, after the
+    // computation, so the rows stay as the matrix produced them. Only the
+    // denominators above are needed while it runs.
+    if(state.proof_level > 1)
+      return;
 
-        // Substituting element i multiplies by a coefficient of
-        // cofactors[i], which is written over cofactor_denom[i] rather than
-        // over 1. Collecting those into one denominator for the whole list
-        // keeps every coefficient an integer, as each of them divides it.
-        coeff common(1);
-        for(const auto& cofactor : cofactors[n]) {
-          assert((size_t)cofactor.i() < basis.size());
-          common.lcm_inplace(cofactor_denom[(size_t)cofactor.i()]);
-        }
-
-        for(const auto& cofactor : cofactors[n]) {
-          const coeff& c = cofactor.c;
-          mon_id a = cofactor.a();
-          mon_id b = cofactor.b();
-          const coeff scale = common / cofactor_denom[(size_t)cofactor.i()];
-          for(const auto& cofactor_i : cofactors[(size_t)cofactor.i()]) {
-            coeff cc = c * cofactor_i.c * scale;
-            mon_id aa = mons.get_product_id(a, cofactor_i.a());
-            mon_id bb = mons.get_product_id(cofactor_i.b(), b);
-            expanded.emplace_back(std::move(cc), aa, cofactor_i.i(), bb);
-          }
-        }
-        cofactors[n] = std::move(expanded);
-        cofactor_denom[n] *= common;
-        cancel_common_factor(cofactors[n], cofactor_denom[n]);
-      }
-      // non-expanded proof
-    } else if(state.proof_level == 1) {
-      // mark input
-      if(basis.size() == 1)
-        for(size_t n = basis.size(); n < cofactors.size(); n++)
-          for(auto& cofactor : cofactors[n])
-            cofactor.t.i = -cofactor.t.i - 1;
-      // not input -> shift all indices down by one
-      else
-        for(size_t n = basis.size(); n < cofactors.size(); n++)
-          for(auto& cofactor : cofactors[n])
-            cofactor.t.i--;
-    }
+    // mark input
+    if(basis.size() == 1)
+      for(size_t n = basis.size(); n < cofactors.size(); n++)
+        for(auto& cofactor : cofactors[n])
+          cofactor.t.i = -cofactor.t.i - 1;
+    // not input -> shift all indices down by one
+    else
+      for(size_t n = basis.size(); n < cofactors.size(); n++)
+        for(auto& cofactor : cofactors[n])
+          cofactor.t.i--;
 
     // write to file
     bool first = true;
@@ -1057,8 +1025,46 @@ struct f4 {
       // special flag for constant polynomial
       if(poly.get_lm_id(p_id) == 0) {
         constant_flag = true;
+        window_start.push_back(basis.size());
         return;
       }
+    }
+
+    window_start.push_back(basis.size());
+  }
+  //------------------------------------------------------------------------------
+  void write_expanded_proof() {
+    if(basis.size() < 2)
+      return;
+    if(window_start.back() != basis.size())
+      window_start.push_back(basis.size());
+
+    {
+      F4NCGB_TIME(other);
+      internal::cofactor_expander<mon_id, coeff, cofactor, monomial_store>
+        expander(mons, cofactors, cofactor_denom);
+      expander.expand_all(window_start);
+    }
+
+    for(size_t n = 1; n < basis.size(); n++) {
+      auto& terms = cofactors[n];
+
+      // the composition collects terms in a hash map 
+      // fix an order here to keep things reproducible
+      std::sort(terms.begin(), terms.end(), [](const auto& x, const auto& y) {
+        if(x.i() != y.i())
+          return x.i() < y.i();
+        if(x.a() != y.a())
+          return x.a() < y.a();
+        return x.b() < y.b();
+      });
+
+      bool first = true;
+      for(const auto& c : terms) {
+        c.log(proof_file, context, mons, cofactor_denom[n], first);
+        first = false;
+      }
+      proof_file << std::endl;
     }
   }
 };

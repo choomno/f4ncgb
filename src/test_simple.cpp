@@ -3,6 +3,8 @@
 #include <thread>
 
 #include "coeff.hpp"
+#include "cofactors.hpp"
+#include "f4.hpp"
 #include "f4ncgb.hpp"
 #include "monomial_trie.hpp"
 #include "options.hpp"
@@ -142,7 +144,8 @@ BOOST_AUTO_TEST_CASE(simple_polynomials) {
   // so it is the rest of the loop that has to stay in step.
   I::idx p5 = p.multiply_front_and_back(f, p2, b, s.getid({ 1, 2, 3, 4, 4 }));
 
-  BOOST_TEST(std::equal(p[p4].begin(), p[p4].end(), p[p5].begin(), p[p5].end()));
+  BOOST_TEST(
+    std::equal(p[p4].begin(), p[p4].end(), p[p5].begin(), p[p5].end()));
 }
 
 template<size_t N>
@@ -361,6 +364,43 @@ BOOST_AUTO_TEST_CASE(c_api_use) {
   // }
 }
 
+BOOST_AUTO_TEST_CASE(reduce_without_reducers) {
+  f4ncgb_set_msg_printing(false);
+
+  Solver s;
+  s.set_nvars(2);
+
+  // x1*x2 - x2*x1, the only polynomial, so there is nothing to reduce it by
+  s.add(1, 1, { 1, 2 });
+  s.add(-1, 1, { 2, 1 });
+  s.end_poly();
+
+  auto [res, polies] = s.reduce();
+
+  BOOST_CHECK(res == F4NCGB_OK);
+  BOOST_REQUIRE(polies.size() == 1);
+  BOOST_REQUIRE(polies[0].size() == 2);
+
+  // the input comes back, leading monomial first
+  rat_coeff rc;
+  fmpq_t correct;
+  fmpq_init(correct);
+
+  auto& [n, d, m] = polies[0][0];
+  rc.update(n, d);
+  fmpq_set_si(correct, -1, 1);
+  BOOST_CHECK(fmpq_equal(rc.value, correct));
+  BOOST_CHECK((m == std::vector<uint32_t>{ 2, 1 }));
+
+  auto& [n2, d2, m2] = polies[0][1];
+  rc.update(n2, d2);
+  fmpq_set_si(correct, 1, 1);
+  BOOST_CHECK(fmpq_equal(rc.value, correct));
+  BOOST_CHECK((m2 == std::vector<uint32_t>{ 1, 2 }));
+
+  fmpq_clear(correct);
+}
+
 BOOST_AUTO_TEST_CASE(reduce_path) {
   f4ncgb_set_msg_printing(false);
 
@@ -413,8 +453,8 @@ same(const solver_result& a, const solver_result& b) {
   return true;
 }
 
-/// Two solves on two threads must not see each other. They used to share their
-/// state through file-scope globals, which this catches.
+// Concurrent solves used to share their state
+// through file-scope globals, which this catches.
 BOOST_AUTO_TEST_CASE(concurrent_solves) {
   f4ncgb_set_msg_printing(false);
 
@@ -433,4 +473,158 @@ BOOST_AUTO_TEST_CASE(concurrent_solves) {
     BOOST_CHECK(same(got_solve, expected_solve));
     BOOST_CHECK(same(got_reduce, expected_reduce));
   }
+}
+
+//------------------------------------------------------------------------------
+// Composition of cofactor transformations (cofactors.hpp).
+
+namespace {
+
+using test_f4 = f4ncgb::f4<1, uint8_t>;
+using test_cofactor = test_f4::cofactor;
+using test_mons = test_f4::monomial_store;
+
+// A term of an expanded row, in a form that is easy to compare.
+struct term {
+  uint32_t a;
+  int i;
+  uint32_t b;
+  long c;
+
+  bool operator==(const term& o) const {
+    return a == o.a and i == o.i and b == o.b and c == o.c;
+  }
+};
+
+std::vector<term>
+sorted(std::vector<term> ts) {
+  std::sort(ts.begin(), ts.end(), [](const term& x, const term& y) {
+    if(x.i != y.i)
+      return x.i < y.i;
+    if(x.a != y.a)
+      return x.a < y.a;
+    return x.b < y.b;
+  });
+  return ts;
+}
+
+std::vector<term>
+sorted_terms(const std::vector<test_cofactor>& row) {
+  std::vector<term> res;
+  for(const auto& t : row)
+    res.push_back({ t.a(), t.i(), t.b(), fmpz_get_si(t.c.value) });
+  return sorted(std::move(res));
+}
+
+constexpr int
+in(int i) {
+  return -i - 1;
+}
+
+}
+
+// g4 = g3 - x*g1 where g3 = x*g1 + g2 expands to f1: the x*f0 terms have to
+// meet in the collection and cancel
+BOOST_AUTO_TEST_CASE(cofactor_composition_cancels) {
+  test_mons mons;
+  mons.set_blocks({ 2 });
+  const uint32_t X = mons.getid({ 1 });
+
+  // index 0 is the free slot, windows are [1,3), [3,4), [4,5)
+  std::vector<std::vector<test_cofactor>> rows(5);
+  std::vector<coeff> denoms(5, coeff(1L));
+
+  rows[1].emplace_back(coeff(1L), 0u, 0, 0u);// g1 = f0
+  rows[2].emplace_back(coeff(1L), 0u, 1, 0u);// g2 = f1
+
+  rows[3].emplace_back(coeff(1L), X, 1, 0u);// g3 = x*g1 + g2
+  rows[3].emplace_back(coeff(1L), 0u, 2, 0u);
+
+  rows[4].emplace_back(coeff(1L), 0u, 3, 0u);// g4 = g3 - x*g1
+  rows[4].emplace_back(coeff(-1L), X, 1, 0u);
+
+  std::vector<size_t> window_start{ 1, 3, 4, 5 };
+  f4ncgb::internal::cofactor_expander<uint32_t, coeff, test_cofactor, test_mons>
+    expander(mons, rows, denoms);
+  expander.expand_all(window_start);
+
+  // g3 = x*f0 + f1
+  const std::vector<term> want3{ { X, in(0), 0, 1 }, { 0, in(1), 0, 1 } };
+  BOOST_TEST((sorted_terms(rows[3]) == sorted(want3)));
+  BOOST_TEST(denoms[3].is_one());
+
+  // g4 = f1, with the two x*f0 terms gone
+  const std::vector<term> want4{ { 0, in(1), 0, 1 } };
+  BOOST_TEST((sorted_terms(rows[4]) == sorted(want4)));
+  BOOST_TEST(denoms[4].is_one());
+}
+
+BOOST_AUTO_TEST_CASE(cofactor_composition_skips_windows) {
+  test_mons mons;
+  mons.set_blocks({ 2 });
+  const uint32_t Y = mons.getid({ 2 });
+
+  // windows are [1,3), [3,4), [4,5), [5,6)
+  std::vector<std::vector<test_cofactor>> rows(6);
+  std::vector<coeff> denoms(6, coeff(1L));
+
+  rows[1].emplace_back(coeff(1L), 0u, 0, 0u);// g1 = f0
+  rows[2].emplace_back(coeff(1L), 0u, 1, 0u);// g2 = f1
+
+  rows[3].emplace_back(coeff(1L), 0u, 1, 0u);// g3 = g1 + g2
+  rows[3].emplace_back(coeff(1L), 0u, 2, 0u);
+
+  rows[4].emplace_back(coeff(1L), Y, 3, 0u);// g4 = y*g3
+
+  rows[5].emplace_back(coeff(1L), 0u, 4, 0u);// g5 = g4 - y*g1, and the g1 term
+  rows[5].emplace_back(coeff(-1L), Y, 1, 0u);// reaches back two windows
+
+  std::vector<size_t> window_start{ 1, 3, 4, 5, 6 };
+  f4ncgb::internal::cofactor_expander<uint32_t, coeff, test_cofactor, test_mons>
+    expander(mons, rows, denoms);
+  expander.expand_all(window_start);
+
+  // g4 = y*f0 + y*f1
+  const std::vector<term> want4{ { Y, in(0), 0, 1 }, { Y, in(1), 0, 1 } };
+  BOOST_TEST((sorted_terms(rows[4]) == sorted(want4)));
+
+  // g5 = y*(f0 + f1) - y*f0 = y*f1, so the y*f0 terms cancel only after the
+  // skipped window has been substituted in
+  const std::vector<term> want5{ { Y, in(1), 0, 1 } };
+  BOOST_TEST((sorted_terms(rows[5]) == sorted(want5)));
+  BOOST_TEST(denoms[5].is_one());
+}
+
+BOOST_AUTO_TEST_CASE(cofactor_composition_denominators) {
+  test_mons mons;
+  mons.set_blocks({ 2 });
+  const uint32_t X = mons.getid({ 1 });
+  const uint32_t Y = mons.getid({ 2 });
+
+  std::vector<std::vector<test_cofactor>> rows(5);
+  std::vector<coeff> denoms(5, coeff(1L));
+
+  rows[1].emplace_back(coeff(1L), 0u, 0, 0u);// g1 = f0
+  rows[2].emplace_back(coeff(1L), 0u, 1, 0u);// g2 = f1
+
+  // g3 = (x*g1 + g2) / 2
+  rows[3].emplace_back(coeff(1L), X, 1, 0u);
+  rows[3].emplace_back(coeff(1L), 0u, 2, 0u);
+  denoms[3] = coeff(2L);
+
+  // g4 = g3 + x*g1 = (3*x*f0 + f1) / 2
+  rows[4].emplace_back(coeff(1L), 0u, 3, 0u);
+  rows[4].emplace_back(coeff(1L), X, 1, 0u);
+
+  std::vector<size_t> window_start{ 1, 3, 4, 5 };
+  f4ncgb::internal::cofactor_expander<uint32_t, coeff, test_cofactor, test_mons>
+    expander(mons, rows, denoms);
+  expander.expand_all(window_start);
+
+  const std::vector<term> want{ { X, in(0), 0, 3 }, { 0, in(1), 0, 1 } };
+  BOOST_TEST((sorted_terms(rows[4]) == sorted(want)));
+  BOOST_TEST((denoms[4] == coeff(2L)));
+
+  // the monomials on both sides have to compose in the right order
+  BOOST_TEST(mons.get_product_id(X, Y) != mons.get_product_id(Y, X));
 }

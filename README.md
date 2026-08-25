@@ -90,6 +90,7 @@ These are the provided options (also visible from `--help`:
     result only with high probability (default: enabled)
 -   **`--verbosity`, `-v`:** Set the verbosity level
 
+
 ## `msolve` Input Format
 
 This format is compatible to the input format of [msolve](https://msolve.lip6.fr/). We provide
@@ -160,7 +161,7 @@ DIMACS format that SAT-solvers use. We provide a simplified EBNF below.
 
 This should produce the following output:
 
-    Running 13 test cases...
+    Running 17 test cases...
      
     *** No errors detected
 
@@ -168,6 +169,18 @@ Internally, the tests also create our store structure multiple times
 and test the memory allocation to fit our requirements.
 
 # Additional features
+
+## Proof logging
+
+With `-p` the solver produces a cofactor representation `sum of c*a*[k]*b` for each basis element.
+A bracketed index is either
+
+-   `[k]`, meaning basis element `k`, or
+-   `[ik]`, meaning input polynomial `k`.
+
+Indexing starts at 0.    
+
+A plain `-p` proof uses both forms, `-e` expands the whole proof back to the input, so only `[ik]` appears.
 
 ## Optimization for Mersenne Primes
 

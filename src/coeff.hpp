@@ -66,6 +66,11 @@ struct coeff {
     return *this;
   }
 
+  coeff& operator+=(const coeff& other) {
+    fmpz_add(value, value, other.value);
+    return *this;
+  }
+
   coeff& operator/=(long b) {
     fmpz_divexact_si(value, value, b);
     return *this;

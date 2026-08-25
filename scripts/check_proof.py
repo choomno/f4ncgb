@@ -55,7 +55,13 @@ if __name__ == '__main__':
     
     input, basis, proof, expanded = read_input(sys.argv)    
     
-    vars = input.readline().split(",")
+    vars = []
+    while True:
+        line = input.readline().rstrip("\n")
+        vars += [v.strip() for v in line.split(",") if v.strip()]
+        if not line.rstrip().endswith(","):
+            break
+
     char = int(input.readline())
         
     K = QQ

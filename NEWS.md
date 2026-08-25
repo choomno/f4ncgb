@@ -1,3 +1,15 @@
+v1.1.1
+==========
+
+## Improvements
+
+  - Improvements to cofactor expansion for `-e` flag.
+
+## Fixes
+
+  - Fix a crash when computing a normal form against no reducers, i.e. when the
+    input to `--reduce` holds a single polynomial.
+
 v1.1.0
 ======
 
