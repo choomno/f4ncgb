@@ -1,5 +1,6 @@
 #include <boost/test/unit_test.hpp>
 
+#include <fstream>
 #include <thread>
 
 #include "coeff.hpp"
@@ -10,6 +11,7 @@
 #include "options.hpp"
 #include "parser.hpp"
 #include "polynomial_store.hpp"
+#include "solve.hpp"
 #include "store.hpp"
 
 using namespace f4ncgb;
@@ -473,6 +475,62 @@ BOOST_AUTO_TEST_CASE(concurrent_solves) {
     BOOST_CHECK(same(got_solve, expected_solve));
     BOOST_CHECK(same(got_reduce, expected_reduce));
   }
+}
+
+//------------------------------------------------------------------------------
+// The blocked reducer pass (linear_algebra_internal.hpp) and the row-at-a-time
+// one (linear_algebra.cpp) have to produce the same basis.
+
+namespace {
+
+std::string
+solve_ug2(reducer_pass pass, size_t threads) {
+  auto dir = get_test_input_files_location();
+  BOOST_REQUIRE(dir.has_value());
+
+  parser_context ctx;
+  solve_options opts;
+  ctx.open(*dir / "ug2-x1x2x3x4-5.ms");
+  parse_res r = ctx.parse_header(opts);
+  BOOST_REQUIRE(!r.has_value());
+
+  opts.maxdeg = 5;
+  opts.maxiter = 1000;
+  opts.la_pass = pass;
+  opts.threads = threads;
+
+  const auto out = std::filesystem::temp_directory_path()
+                   / ("f4ncgb_pass_" + std::to_string(static_cast<int>(pass))
+                      + "_" + std::to_string(threads) + ".out");
+
+  run_options run;
+  run.output_name = out.string();
+  BOOST_REQUIRE(f4ncgb_main(ctx, opts, run) == 0);
+
+  std::ifstream f(out);
+  std::string res((std::istreambuf_iterator<char>(f)),
+                  std::istreambuf_iterator<char>());
+  std::filesystem::remove(out);
+  return res;
+}
+
+}
+
+BOOST_AUTO_TEST_CASE(blocked_reduction_matches_row_at_a_time) {
+  f4ncgb_set_msg_printing(false);
+
+  const std::string want = solve_ug2(reducer_pass::row_at_a_time, 1);
+  BOOST_REQUIRE(!want.empty());
+
+  // 31783 columns in the last matrix, so several blocks to carry reducers
+  // between and get wrong
+  BOOST_TEST(solve_ug2(reducer_pass::blocked, 1) == want);
+  BOOST_TEST(solve_ug2(reducer_pass::blocked, 4) == want);
+
+  // and the default, which times a sample of each matrix both ways and may
+  // hand the rest of it back to the row-at-a-time pass
+  BOOST_TEST(solve_ug2(reducer_pass::calibrate, 1) == want);
+  BOOST_TEST(solve_ug2(reducer_pass::calibrate, 4) == want);
 }
 
 //------------------------------------------------------------------------------

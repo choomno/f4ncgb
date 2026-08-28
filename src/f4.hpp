@@ -107,6 +107,7 @@ struct f4 {
     , tracer(opts_.tracer) {
 
     state.proof_level = opts.proof_level;
+    state.la_pass = opts.la_pass;
 
     // Variables are numbered 1..num_vars, so that is all the key has to hold.
     key_bits

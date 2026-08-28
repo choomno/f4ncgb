@@ -73,7 +73,7 @@ struct statistics {
       if(!target)
         return;
 
-      // The addition is only carried out once! 
+      // The addition is only carried out once!
       // The destructor may be called multiple times.
       std::chrono::time_point<std::chrono::high_resolution_clock> end
         = std::chrono::high_resolution_clock().now();

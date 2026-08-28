@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "solve_state.hpp"
+
 namespace f4ncgb {
 
 // Fixed for the duration of a computation -- the part that changes while one
@@ -44,6 +46,10 @@ struct solve_options {
 
   // Compute the normal form of the last input polynomial instead of a basis.
   bool reduce = false;
+
+  // Decides between the blocked reducer pass and the one-row-at-a-time
+  // elimination. Only the test set it to compare the two against each other.
+  reducer_pass la_pass = reducer_pass::calibrate;
 
   size_t num_blocks() const { return blocks.size(); }
 

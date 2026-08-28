@@ -1,3 +1,11 @@
+unreleased
+==========
+
+## Improvements
+
+  - perform Gaussian elimination blockwise  
+  - vectorised hot loop in linear algebra
+
 v1.1.1
 ==========
 

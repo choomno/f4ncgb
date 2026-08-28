@@ -7,6 +7,11 @@
 
 namespace f4ncgb {
 
+// The way linear_algebra.cpp reduces the s-polynomials against the
+// reducers. `calibrate` times a sample of the matrix both ways and keeps the
+// one that won; the other two fix the choice (needed for the testing)
+enum class reducer_pass { calibrate, blocked, row_at_a_time };
+
 // The part of a single computation's state that reaches beyond the f4 object:
 // the parser fills in the input denominators, the linear algebra reads the
 // proof and normalization settings.
@@ -31,5 +36,8 @@ struct solve_state {
 
   // Computing a normal form instead of a basis.
   bool reduce_mode = false;
+
+  // Copied from solve_options
+  reducer_pass la_pass = reducer_pass::calibrate;
 };
 }
