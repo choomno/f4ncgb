@@ -4,10 +4,8 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
-#include <string.h>
 
 #include "diagnostics.hpp"
-#include "f4ncgb.hpp"
 #include "options.hpp"
 #include "parser.hpp"
 #include "solve.hpp"

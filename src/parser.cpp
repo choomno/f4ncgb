@@ -4,7 +4,6 @@
 #include <cstring>
 
 #include "parser.hpp"
-#include "store.hpp"
 #include "zip_utils.hpp"
 
 #define xstr(s) str(s)

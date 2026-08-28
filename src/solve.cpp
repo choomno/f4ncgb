@@ -11,7 +11,6 @@
 #include "options.hpp"
 #include "output.hpp"
 #include "parser.hpp"
-#include "store.hpp"
 
 namespace f4ncgb {
 

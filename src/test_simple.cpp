@@ -7,7 +7,6 @@
 #include "cofactors.hpp"
 #include "f4.hpp"
 #include "f4ncgb.hpp"
-#include "monomial_trie.hpp"
 #include "options.hpp"
 #include "parser.hpp"
 #include "polynomial_store.hpp"

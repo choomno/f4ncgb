@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <memory>
 #include <numeric>
 #include <span>
@@ -19,7 +18,6 @@
 #include "multimodular.hpp"
 #include "primes.hpp"
 #include "sparse_rref/sparse_mat.h"
-#include "store.hpp"
 
 extern int verbose;
 

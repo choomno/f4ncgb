@@ -2,7 +2,6 @@
 #include "f4ncgb.hpp"
 #include "parser.hpp"
 #include "solve.hpp"
-#include <climits>
 #include <config.hpp>
 #include <exception>
 #include <limits>

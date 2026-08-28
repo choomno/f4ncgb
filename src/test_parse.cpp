@@ -1,12 +1,10 @@
 #include <array>
 #include <boost/test/unit_test_log.hpp>
-#include <cstdio>
 #include <filesystem>
 #include <string>
 
 #include <boost/test/unit_test.hpp>
 
-#include "f4ncgb.hpp"
 #include "options.hpp"
 #include "parser.hpp"
 #include "polynomial_store.hpp"

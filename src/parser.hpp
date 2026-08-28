@@ -2,7 +2,6 @@
 
 #include "coeff.hpp"
 #include "options.hpp"
-#include "polynomial_store.hpp"
 
 #include <cstdio>
 #include <filesystem>

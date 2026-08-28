@@ -5,13 +5,11 @@
 #include <stdexcept>
 #include <tuple>
 
-#include "f4ncgb.hpp"
 #include "fuzztest/fuzztest.h"
 #include "fuzztest/internal/any.h"
 #include "options.hpp"
 #include "parser.hpp"
 #include "solve.hpp"
-#include "store.hpp"
 #include <gtest/gtest.h>
 
 using namespace f4ncgb;

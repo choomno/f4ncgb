@@ -4,7 +4,6 @@
 #include <flint/fmpq.h>
 #include <flint/fmpz.h>
 #include <iostream>
-#include <utility>
 
 namespace f4ncgb {
 

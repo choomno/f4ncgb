@@ -13,7 +13,6 @@
 #include <span>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 #include <boost/align/align_down.hpp>
 #include <boost/align/align_up.hpp>
@@ -25,11 +24,7 @@
 #include <boost/container_hash/hash.hpp>
 #include <boost/unordered/unordered_flat_map.hpp>
 
-#include "coeff.hpp"
 #include "diagnostics.hpp"
-#include "f4ncgb.hpp"
-
-#include "ambiguity.hpp"
 
 #ifdef F4NCGB_ENABLE_STORE_TRACE
 #include "store_tracer.hpp"

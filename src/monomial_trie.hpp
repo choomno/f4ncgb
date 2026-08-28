@@ -4,6 +4,7 @@
 #include <bit>
 #include <cassert>
 #include <cstdint>
+#include <iostream>
 #include <span>
 #include <vector>
 
