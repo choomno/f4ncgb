@@ -685,3 +685,69 @@ BOOST_AUTO_TEST_CASE(cofactor_composition_denominators) {
   // the monomials on both sides have to compose in the right order
   BOOST_TEST(mons.get_product_id(X, Y) != mons.get_product_id(Y, X));
 }
+
+//------------------------------------------------------------------------------
+
+namespace {
+
+// Deterministic, so a failure is reproducible.
+struct word_source {
+  uint64_t state = 0;
+
+  uint64_t next() {
+    state = state * 6364136223846793005ull + 1442695040888963407ull;
+    return state >> 33;
+  }
+
+  std::vector<uint8_t> word(size_t vars, size_t len) {
+    std::vector<uint8_t> w(len);
+    for(size_t i = 0; i < len; i++)
+      w[i] = static_cast<uint8_t>(1 + next() % vars);
+    return w;
+  }
+};
+
+}
+
+BOOST_AUTO_TEST_CASE(batched_products_match_term_at_a_time) {
+  using I = impl<>;
+  constexpr size_t vars = 6;
+
+  I::monomial_store scalar, batched;
+
+  word_source src{ 4242 };
+  for(int row = 0; row < 40; row++) {
+    const auto a = src.word(vars, src.next() % 4);
+    const auto c = src.word(vars, src.next() % 4);
+    // rows on both sides of the chunk the store walks a row in
+    const size_t len = 1 + src.next() % 80;
+
+    std::vector<uint32_t> ms_scalar, ms_batched;
+    for(size_t i = 0; i < len; i++) {
+      const auto m = src.word(vars, 1 + src.next() % 12);
+      ms_scalar.push_back(scalar.getid(m));
+      ms_batched.push_back(batched.getid(m));
+    }
+    BOOST_REQUIRE(ms_scalar == ms_batched);
+
+    const uint32_t ia = scalar.getid(a), ic = scalar.getid(c);
+    const uint32_t ja = batched.getid(a), jc = batched.getid(c);
+
+    std::vector<uint32_t> one(len), all(len);
+    for(size_t i = 0; i < len; i++)
+      one[i] = scalar.get_product_id(scalar[ia], ms_scalar[i], scalar[ic]);
+    batched.get_product_ids(batched[ja], ms_batched, batched[jc], all.data());
+
+    BOOST_TEST(one == all);
+
+    // and the words behind those ids really are the concatenation
+    for(size_t i = 0; i < len; i++) {
+      std::vector<uint8_t> w(a);
+      const auto mv = batched[ms_batched[i]];
+      w.insert(w.end(), mv.begin(), mv.end());
+      w.insert(w.end(), c.begin(), c.end());
+      const auto got = batched[all[i]];
+      BOOST_TEST(std::equal(w.begin(), w.end(), got.begin(), got.end()));
+    }
+  }
+}

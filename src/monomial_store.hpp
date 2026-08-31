@@ -1,7 +1,10 @@
 #pragma once
 
+#include <array>
+#include <bit>
 #include <cstring>
 #include <optional>
+#include <vector>
 
 #include "ambiguity.hpp"
 #include "store.hpp"
@@ -16,8 +19,7 @@ template<internal::metadata_concept M = internal::metadata<uint8_t>,
 class monomial_store;
 
 template<metadata_concept M, value_concept V, typename I, uint16_t Nblocks>
-class monomial_store
-  : public store<monomial_store<M, V, I, Nblocks>, M, V, I> {
+class monomial_store : public store<monomial_store<M, V, I, Nblocks>, M, V, I> {
   using self = monomial_store<M, V, I, Nblocks>;
   using base = store<self, M, V, I>;
   friend base;
@@ -28,32 +30,106 @@ class monomial_store
   store_tracer tracer_ = store_tracer("monomial_store");
 #endif
 
-  boost::unordered_flat_map<std::span<const V>,
-                            I,
-                            boost::hash<std::span<const V>>,
-                            typename base::V_span_equality_struct>
-    map_;
+  //  `tag` holds 32 bits of the word hash and doubles as the key the index is
+  //  derived from, so growing the table never has to walk the words again.
+  struct word_entry {
+    I id = 0;
+    uint32_t tag = 0;
+  };
+
+  static constexpr uint64_t table_mixer = 0x9e3779b97f4a7c15ull;
+
+  // Linear probing degrades sharply near a full table, and eight entries share
+  // a cache line, so the chains this leaves are cheap to walk.
+  static constexpr size_t table_load_num = 7;
+  static constexpr size_t table_load_den = 10;
+
+  std::vector<word_entry> table_;
+  size_t table_mask_ = 0;
+  size_t table_shift_ = 64;
+  size_t table_limit_ = 0;
+  size_t table_size_ = 0;
+
+  boost::hash<std::span<const V>> hasher_;
+
+  // Staging for get_product_ids(), reused across rows.
+  std::vector<V> row_;
+
+  inline size_t table_index(uint32_t tag) const {
+    return static_cast<size_t>((static_cast<uint64_t>(tag) * table_mixer)
+                               >> table_shift_);
+  }
+
+  void table_rehash(size_t want) {
+    std::vector<word_entry> old;
+    old.swap(table_);
+
+    table_.assign(want, word_entry{});
+    table_mask_ = want - 1;
+    table_shift_ = 64 - static_cast<size_t>(std::countr_zero(want));
+    table_limit_ = want * table_load_num / table_load_den;
+
+    for(const word_entry& e : old) {
+      if(e.id == 0)
+        continue;
+      size_t i = table_index(e.tag);
+      while(table_[i].id != 0)
+        i = (i + 1) & table_mask_;
+      table_[i] = e;
+    }
+  }
+
+  // Finds the word, or reports the free slot it would be inserted into.
+  inline I table_find(const std::span<const V>& v,
+                      uint32_t tag,
+                      size_t& pos) const {
+    size_t i = table_index(tag);
+    for(;;) {
+      const word_entry& e = table_[i];
+      if(e.id == 0) {
+        pos = i;
+        return 0;
+      }
+      if(e.tag == tag and base::V_equal((*this)[e.id], v))
+        return e.id;
+      i = (i + 1) & table_mask_;
+    }
+  }
+
+  // `pos` comes from the table_find() that just missed; a rehash invalidates
+  // it, so the slot is looked up again in that case.
+  inline void table_insert(size_t pos, I id, uint32_t tag) {
+    if(table_size_ >= table_limit_) {
+      table_rehash(table_.size() * 2);
+      pos = table_index(tag);
+      while(table_[pos].id != 0)
+        pos = (pos + 1) & table_mask_;
+    }
+    table_[pos] = word_entry{ id, tag };
+    table_size_++;
+  }
 
   protected:
-  
+  inline I commit_scratch(const std::span<const V>& scratch,
+                          size_t pos,
+                          uint32_t tag) {
+    const I res = base::insert_scratch();
+    table_insert(pos, res, tag);
+    return res;
+  }
+
   std::optional<I> find(const std::span<const V>& v) const {
     F4NCGB_PROFILE(gstats.store_find_calls++);
     if(v.size() == 0)
       return 0;
 
-    const auto it = map_.find(v);
-    if(it == map_.end())
+    size_t pos;
+    const I id = table_find(v, static_cast<uint32_t>(hasher_(v)), pos);
+    if(id == 0)
       return std::nullopt;
 
     F4NCGB_PROFILE(gstats.store_find_hits++);
-    return it->second + 1;
-  }
-
-  inline I commit_scratch(const std::span<const V>& scratch) {
-    const I id = base::scratch_id() - 1;
-    const I res = base::insert_scratch();
-    map_.emplace(scratch, id);
-    return res;
+    return id;
   }
 
   static inline V* copy_values(const std::span<const V>& src, V* dst) {
@@ -69,14 +145,24 @@ class monomial_store
   }
 
   public:
+  monomial_store() { table_rehash(1024); }
+
   inline I getid(const std::span<const V>& v) {
-    if(const auto id = find(v))
-      return *id;
+    F4NCGB_PROFILE(gstats.store_find_calls++);
+    if(v.size() == 0)
+      return 0;
+
+    const uint32_t tag = static_cast<uint32_t>(hasher_(v));
+    size_t pos;
+    if(const I id = table_find(v, tag, pos)) {
+      F4NCGB_PROFILE(gstats.store_find_hits++);
+      return id;
+    }
 
     auto [m, vv] = base::new_scratch(v.size());
     copy_values(v, vv);
     m.length = v.size();
-    return commit_scratch(std::span<const V>(vv, v.size()));
+    return commit_scratch(std::span<const V>(vv, v.size()), pos, tag);
   }
   inline I getid(std::vector<V> v) {
     std::span<const V> s(v.begin(), v.size());
@@ -107,15 +193,89 @@ class monomial_store
     it = copy_values(b_v, it);
     copy_values(c, it);
 
+    const std::span<const V> w(vv, length_combined);
+
     F4NCGB_PROFILE(gstats.store_find_calls++);
-    auto [entry, inserted]
-      = map_.try_emplace(std::span<const V>(vv, length_combined),
-                         base::scratch_id() - 1);
-    if(!inserted) {
+    const uint32_t tag = static_cast<uint32_t>(hasher_(w));
+    size_t pos;
+    if(const I id = table_find(w, tag, pos)) {
       F4NCGB_PROFILE(gstats.store_find_hits++);
-      return entry->second + 1;
+      // the scratch tip is simply left uncommitted
+      return id;
     }
-    return base::insert_scratch();
+
+    return commit_scratch(w, pos, tag);
+  }
+
+  // The ids of a*m*c for every m in `ms`, with a and c fixed.
+  inline void get_product_ids(const std::span<const V>& a,
+                              const std::span<const I>& ms,
+                              const std::span<const V>& c,
+                              I* out) {
+    // Bounded so that the words staged ahead of a probe are still in cache by
+    // the time that probe runs.
+    constexpr size_t chunk = 32;
+    struct staged {
+      uint32_t off;
+      uint32_t len;
+      uint32_t tag;
+    };
+    std::array<staged, chunk> st;
+
+    const size_t na = a.size(), nc = c.size();
+
+    for(size_t lo = 0; lo < ms.size(); lo += chunk) {
+      const size_t hi = std::min(lo + chunk, ms.size());
+      row_.clear();
+
+      for(size_t i = lo; i < hi; i++) {
+        const std::span<const V> b_v = (*this)[ms[i]];
+        const size_t n = na + b_v.size() + nc;
+
+        staged& e = st[i - lo];
+        e.off = static_cast<uint32_t>(row_.size());
+        e.len = static_cast<uint32_t>(n);
+        if(n == 0)
+          continue;
+
+        if(n > std::numeric_limits<typename base::length_type>::max()) {
+          throw length_overrun_exception(
+            n, std::numeric_limits<typename base::length_type>::max());
+        }
+
+        row_.resize(row_.size() + n);
+        V* it = copy_values(a, row_.data() + e.off);
+        it = copy_values(b_v, it);
+        copy_values(c, it);
+
+        e.tag = static_cast<uint32_t>(
+          hasher_(std::span<const V>(row_.data() + e.off, n)));
+        __builtin_prefetch(&table_[table_index(e.tag)]);
+      }
+
+      for(size_t i = lo; i < hi; i++) {
+        const staged& e = st[i - lo];
+        if(e.len == 0) {
+          out[i] = 0;
+          continue;
+        }
+
+        const std::span<const V> w(row_.data() + e.off, e.len);
+
+        F4NCGB_PROFILE(gstats.store_find_calls++);
+        size_t pos;
+        if(const I id = table_find(w, e.tag, pos)) {
+          F4NCGB_PROFILE(gstats.store_find_hits++);
+          out[i] = id;
+          continue;
+        }
+
+        auto [m, vv] = base::new_scratch(e.len);
+        copy_values(w, vv);
+        m.length = e.len;
+        out[i] = commit_scratch(w, pos, e.tag);
+      }
+    }
   }
 
   std::ostream& print_monomial(I i, std::ostream& o) const {

@@ -136,9 +136,7 @@ class polynomial_store
     });
   }
 
-  inline I get_lm_id(I id) const {
-    return get_monomial_id(id, 0);
-  }
+  inline I get_lm_id(I id) const { return get_monomial_id(id, 0); }
 
   inline void set_idx(I id, uint32_t idx) {
     assert(idx != 0);
@@ -170,18 +168,16 @@ class polynomial_store
     const std::span<const I> p_mons = (*this)[p];
 
     // f and b are the same for every term, so their values are looked up once
-    // here rather than once per term inside get_product_id().
     const auto f_v = store_[f];
     const auto b_v = store_[b];
 
-    I i = 0;
     if constexpr(have_lm) {
       assert(length > 0);
       new_i[0] = known_lm;
-      i = 1;
+      store_.get_product_ids(f_v, p_mons.subspan(1), b_v, new_i + 1);
+    } else {
+      store_.get_product_ids(f_v, p_mons, b_v, new_i);
     }
-    for(; i < length; ++i)
-      new_i[i] = store_.get_product_id(f_v, p_mons[i], b_v);
 
     I g = commit();
     this->get_metadata(g).coefficients = p_metadata.coefficients;

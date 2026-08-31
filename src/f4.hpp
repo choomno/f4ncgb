@@ -29,6 +29,7 @@
 
 #include "monomial_trie.hpp"
 #include "polynomial_store.hpp"
+#include "probe_map.hpp"
 #include "store.hpp"
 
 namespace f4ncgb {
@@ -183,9 +184,8 @@ struct f4 {
   std::vector<size_t> window_start{ 1 };
   //------------------------------------------------------------------------------
   inline parse_res read_input(parser_context& context) {
-    parse_res res
-      = parse_rest_into_polynomial_store(
-        context, poly, state.input_denoms, opts.num_vars);
+    parse_res res = parse_rest_into_polynomial_store(
+      context, poly, state.input_denoms, opts.num_vars);
     // Print in case of doubt.
     // write_all(std::cout, context, opts, poly);
     return res;
@@ -372,7 +372,8 @@ struct f4 {
     size_t d = minimal_amb->first;
 
     if(verbose > 1)
-      msg("Selected degree %d (%d ambiguities).", d, minimal_amb->second.size());
+      msg(
+        "Selected degree %d (%d ambiguities).", d, minimal_amb->second.size());
 
     crit_pairs.reserve(minimal_amb->second.size());
     for(const auto& a : minimal_amb->second) {
@@ -393,7 +394,7 @@ struct f4 {
   std::vector<mon_id> next_same_ci;
   void gebauer_moeller(std::vector<ambiguity_>& new_amb) {
     // first index is always the newer polynomial
-    
+
     // sort to group identical elements and remove duplicates
     std::sort(new_amb.begin(),
               new_amb.end(),
@@ -546,7 +547,7 @@ struct f4 {
 
   //------------------------------------------------------------------------------
 
-  boost::unordered_flat_map<mon_id, uint32_t> todo_seen;
+  internal::probe_map todo_seen;
   std::vector<uint32_t> pivot_slots;
   size_t last_columns = 0;
 
@@ -556,29 +557,38 @@ struct f4 {
     reducers.clear();
     columns.clear();
     pivot_slots.clear();
-    todo_seen.clear();
     idxs_spol.clear();
     idxs_red.clear();
 
     const size_t guess = std::max<size_t>(1L << 16, last_columns);
     columns.reserve(guess);
-    todo_seen.reserve(guess);
+    todo_seen.reset(guess);
 
     const size_t staged_spolies = spolies.size();
 
     auto touch = [&](mon_id m) {
-      auto [it, inserted]
-        = todo_seen.try_emplace(m, static_cast<uint32_t>(columns.size()));
+      auto [slot, inserted]
+        = todo_seen.find_or_insert(m, static_cast<uint32_t>(columns.size()));
       if(inserted) {
         columns.push_back(m);
         check_fits(columns.size(), UINT32_MAX, "number of matrix columns");
       }
-      return it->second;
+      return *slot;
     };
 
+    // prefetching helps
+    constexpr size_t lookahead = 8;
+
     auto emit_row = [&](csr_indices& idxs, auto mons) {
-      for(const auto m : mons)
-        idxs.push(touch(m));
+      const size_t n = mons.size();
+      for(size_t i = 0; i < std::min(lookahead, n); i++)
+        todo_seen.prefetch(mons[i]);
+
+      for(size_t i = 0; i < n; i++) {
+        if(i + lookahead < n)
+          todo_seen.prefetch(mons[i + lookahead]);
+        idxs.push(touch(mons[i]));
+      }
       idxs.end_row();
     };
 
@@ -598,9 +608,9 @@ struct f4 {
           ai, static_cast<int>(poly.get_idx(lm_to_poly[i])), ci);
     };
 
-    // the two vectors have to line up, because sort_rows() permutes them together.
-    assert(state.proof_level == 0
-           or extended_spolies.size() == staged_spolies);
+    // the two vectors have to line up, because sort_rows() permutes them
+    // together.
+    assert(state.proof_level == 0 or extended_spolies.size() == staged_spolies);
 
     for(size_t i = 0; i < staged_spolies; i++)
       emit_row(idxs_spol, poly[spolies[i]]);
@@ -615,7 +625,7 @@ struct f4 {
 
       mon_id lm = mons_f[0];
       bool first_time
-        = todo_seen.try_emplace(lm, static_cast<uint32_t>(columns.size()))
+        = todo_seen.find_or_insert(lm, static_cast<uint32_t>(columns.size()))
             .second;
       if(first_time) {
         pivot_slots.push_back(static_cast<uint32_t>(columns.size()));
@@ -660,7 +670,7 @@ struct f4 {
   poly_id find_reducer(mon_id m) {
     // Strategy: the reducer with the fewest terms, ties going to the smallest
     // leading monomial and then to the last occurrence.
-    
+
     std::pair<mon_id, size_t> match{ 0, 0 };
     uint32_t best_terms = 0;
     prefix_trie.for_each_shortest_divisor(
@@ -877,12 +887,12 @@ struct f4 {
   csr_indices idxs_spol;
   std::vector<std::span<coeff>> entries_red;
   csr_indices idxs_red;
- 
+
   size_t key_bits = 8;
   size_t key_packed = 6;
 
   // Length and leading variables of a monomial, packed so that comparing the
-  // two integers agrees with the monomial order. Equal keys fall back to the 
+  // two integers agrees with the monomial order. Equal keys fall back to the
   // full comparison. Only valid for deglex.
   inline uint64_t sort_key(mon_id m) const {
     const monomial v = mons[m];
@@ -1005,8 +1015,8 @@ struct f4 {
         mon_id m_id = poly.get_lm_id(p_id);
         lm_to_poly[m_id] = p_id;
 
-        // update tries. The term count is also included so that 
-        // find_reducer() can rank a candidate without going back 
+        // update tries. The term count is also included so that
+        // find_reducer() can rank a candidate without going back
         // to the polynomial for it.
         monomial m = mons[m_id];
         prefix_trie.insert(m, m_id, poly.get_length(p_id));
@@ -1050,7 +1060,7 @@ struct f4 {
     for(size_t n = 1; n < basis.size(); n++) {
       auto& terms = cofactors[n];
 
-      // the composition collects terms in a hash map 
+      // the composition collects terms in a hash map
       // fix an order here to keep things reproducible
       std::sort(terms.begin(), terms.end(), [](const auto& x, const auto& y) {
         if(x.i() != y.i())
