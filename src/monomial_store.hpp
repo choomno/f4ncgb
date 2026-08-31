@@ -110,9 +110,7 @@ class monomial_store : public store<monomial_store<M, V, I, Nblocks>, M, V, I> {
   }
 
   protected:
-  inline I commit_scratch(const std::span<const V>& scratch,
-                          size_t pos,
-                          uint32_t tag) {
+  inline I commit_scratch(size_t pos, uint32_t tag) {
     const I res = base::insert_scratch();
     table_insert(pos, res, tag);
     return res;
@@ -162,7 +160,7 @@ class monomial_store : public store<monomial_store<M, V, I, Nblocks>, M, V, I> {
     auto [m, vv] = base::new_scratch(v.size());
     copy_values(v, vv);
     m.length = v.size();
-    return commit_scratch(std::span<const V>(vv, v.size()), pos, tag);
+    return commit_scratch(pos, tag);
   }
   inline I getid(std::vector<V> v) {
     std::span<const V> s(v.begin(), v.size());
@@ -204,7 +202,7 @@ class monomial_store : public store<monomial_store<M, V, I, Nblocks>, M, V, I> {
       return id;
     }
 
-    return commit_scratch(w, pos, tag);
+    return commit_scratch(pos, tag);
   }
 
   // The ids of a*m*c for every m in `ms`, with a and c fixed.
@@ -273,7 +271,7 @@ class monomial_store : public store<monomial_store<M, V, I, Nblocks>, M, V, I> {
         auto [m, vv] = base::new_scratch(e.len);
         copy_values(w, vv);
         m.length = e.len;
-        out[i] = commit_scratch(w, pos, e.tag);
+        out[i] = commit_scratch(pos, e.tag);
       }
     }
   }
