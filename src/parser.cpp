@@ -41,6 +41,10 @@ isdigit_(char c) {
 
 #define EXPECT_NO_OVERFLOW()                          \
   do {                                                \
+    if(number_missing_) {                             \
+      number_missing_ = false;                        \
+      RETURN_ERROR("Expected a digit");               \
+    }                                                 \
     if(number_overflow_) {                            \
       number_overflow_ = false;                       \
       RETURN_ERROR("Number is too large to be read"); \
@@ -147,6 +151,7 @@ parser_context::impl_msolve(parse_add_cb add_cb,
         denominator = 1;
         if(c == '/') {
           c = getc();
+          EXPECT_DIGIT();
           denominator = read_positive_int();
           EXPECT_NO_OVERFLOW();
           if(denominator == 0) {
@@ -367,7 +372,9 @@ parse_res
 parser_context::read_blocks() {
   size_t block = 0;
   while(block < opts_->num_blocks()) {
-    if constexpr(std::is_same_v<typeof(getV), typeof(read_numeric_var)>) {
+    if(current_c() == EOF)
+      RETURN_ERROR("Input ended before every block was closed by a 0");
+    if constexpr(getV == &parser_context::read_numeric_var) {
       EXPECT_DIGIT();
     }
     parser_symbolic_context::id v = getV(*this);
@@ -417,6 +424,9 @@ parser_context::impl_poly_gen(parse_add_cb add_cb,
 
         // Monomial Vars
         while(c != '+' && c != '0' && c != EOF) {
+          if constexpr(getV == &parser_context::read_numeric_var) {
+            EXPECT_DIGIT();
+          }
           v = getV(*this);
           ADD(v);
           swallow_whitespace_and_newline();

@@ -1,6 +1,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <fstream>
+#include <sstream>
 #include <thread>
 
 #include "coeff.hpp"
@@ -364,6 +365,99 @@ BOOST_AUTO_TEST_CASE(c_api_use) {
   //   std::cout << "0" << std::endl;
   // }
 }
+
+BOOST_AUTO_TEST_CASE(max_blocks_boundary) {
+  f4ncgb_set_msg_printing(false);
+
+  // Exactly F4NCGB_MAX_BLOCKS blocks.
+  Solver s;
+  s.set_blocks(std::vector<uint32_t>(F4NCGB_MAX_BLOCKS, 1));
+  s.set_maxiter(2);
+  s.set_maxdeg(4);
+
+  // x1*x2 - x3 and x2*x1 - x4, in an order where every variable is its own
+  // block
+  s.add(1, 1, { 1, 2 });
+  s.add(-1, 1, { 3 });
+  s.end_poly();
+  s.add(1, 1, { 2, 1 });
+  s.add(-1, 1, { 4 });
+  s.end_poly();
+
+  auto [res, polies] = s.solve();
+  BOOST_CHECK(res == F4NCGB_OK);
+  BOOST_CHECK(polies.size() == 2);
+
+  // one block more stays refused, and by the setter rather than by a crash
+  Solver too_many;
+  BOOST_CHECK_THROW(
+    too_many.set_blocks(std::vector<uint32_t>(F4NCGB_MAX_BLOCKS + 1, 1)),
+    std::runtime_error);
+}
+
+namespace {
+
+// The braid3 relations on the top three variables of an `nvars` variable
+// problem, serialised with those three numbered from the top so that runs with
+// different `nvars` compare.
+std::string
+solve_on_top_vars(uint32_t nvars, uint32_t characteristic) {
+  const uint32_t base = nvars - 3;
+  const uint32_t x = base + 1, y = base + 2, z = base + 3;
+
+  Solver s;
+  s.set_nvars(nvars);
+  s.set_characteristic(characteristic);
+  s.set_maxiter(4);
+
+  auto poly = [&s](std::vector<std::pair<long, std::vector<uint32_t>>> terms) {
+    for(const auto& [c, m] : terms)
+      s.add(c, 1, m);
+    s.end_poly();
+  };
+
+  poly({ { 1, { z, y, z } }, { -1, { y, x, y } } });
+  poly({ { 1, { z, x, y } }, { -1, { x, y, x } } });
+  poly({ { 1, { z, x, z } }, { -1, { y, z, x } } });
+  poly({ { 1, { z, z, z } },
+         { 1, { y, y, y } },
+         { 1, { x, x, x } },
+         { 1, { x, y, z } } });
+
+  auto [res, polies] = s.solve();
+  if(res != F4NCGB_OK)
+    return "solve failed";
+
+  std::ostringstream o;
+  for(const auto& p : polies) {
+    for(const auto& [num, den, mon] : p) {
+      o << num << "/" << den << ":";
+      for(uint32_t v : mon)
+        o << " " << (v - base);
+      o << " ";
+    }
+    o << "\n";
+  }
+  return o.str();
+}
+
+}
+
+BOOST_AUTO_TEST_CASE(uint16_variables_match_uint8) {
+  f4ncgb_set_msg_printing(false);
+
+  // 254 variables still fit uint8_t, 255 and above switch V to uint16_t
+  for(uint32_t characteristic : { 0u, 32003u }) {
+    const std::string want = solve_on_top_vars(254, characteristic);
+    BOOST_REQUIRE(!want.empty());
+    BOOST_REQUIRE(want != "solve failed");
+
+    BOOST_TEST(solve_on_top_vars(255, characteristic) == want);
+    BOOST_TEST(solve_on_top_vars(300, characteristic) == want);
+  }
+}
+
+//------------------------------------------------------------------------------
 
 BOOST_AUTO_TEST_CASE(reduce_without_reducers) {
   f4ncgb_set_msg_printing(false);

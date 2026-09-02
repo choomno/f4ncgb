@@ -152,7 +152,7 @@ f4ncgb_set_characteristic(f4ncgb_handle* h, uint32_t characteristic) {
   REQUIRE_READY(h);
 
   if(characteristic > 2147483647l) {// 2^31 -1
-    return "provided characteristic %lu is too large. Only p < 2^31 supported";
+    return "provided characteristic is too large. Only p < 2^31 supported";
   } else if(characteristic != 0 and !n_is_prime(characteristic)) {
     return "provided nonzero characteristic is not prime";
   }

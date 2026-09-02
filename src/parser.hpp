@@ -121,8 +121,13 @@ class parser_context {
   // Set when a number in the input did not fit
   bool number_overflow_ = false;
 
+  bool number_missing_ = false;
+
   inline size_t read_digits(size_t limit) {
-    assert(c >= '0' && c <= '9');
+    if(c < '0' || c > '9') {
+      number_missing_ = true;
+      return 0;
+    }
     size_t num = 0;
     do {
       const size_t digit = static_cast<size_t>(c) - '0';

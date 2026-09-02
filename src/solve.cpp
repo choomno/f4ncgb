@@ -22,7 +22,8 @@ struct f4_base {
   virtual void write_basis(std::ostream& os) = 0;
   virtual void write_basis(void* userdata,
                            f4ncgb_add_cb add_cb,
-                           f4ncgb_end_poly_cb end_poly_cb) = 0;
+                           f4ncgb_end_poly_cb end_poly_cb)
+    = 0;
   virtual void print_read_problem() = 0;
   virtual void print_parameters(const std::string& output_name) = 0;
 
@@ -123,7 +124,7 @@ f4ncgb_main(parser_context& context,
             const solve_options& opts,
             const run_options& run) {
 
-  return boost::mp11::mp_with_index<F4NCGB_MAX_BLOCKS>(
+  return boost::mp11::mp_with_index<F4NCGB_MAX_BLOCKS + 1>(
     opts.num_blocks(), [&context, &opts, &run](auto Nblocks) -> int {
       std::unique_ptr<f4_base> algo_ptr;
       size_t nvars = opts.num_vars;
