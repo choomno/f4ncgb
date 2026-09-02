@@ -1,11 +1,16 @@
-unreleased
+v1.1.2
 ==========
 
 ## Improvements
 
+  - improved hash-map for monomial store
   - perform Gaussian elimination blockwise  
   - vectorised hot loop in linear algebra
+  
+## Fixes
 
+  - Fixes for broken inputs in parsing
+ 
 v1.1.1
 ==========
 

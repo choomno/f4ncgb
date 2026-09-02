@@ -5,21 +5,21 @@ in free algebras (with rational coefficients or coefficients in a prime field).
 It transfers recent advancements in commutative Gröbner basis software to the
 noncommutative setting.
 
-Below is a runtime comparison (in seconds) of `f4ncgb` (version 1.1.0) with the state-of-the-art tool [Singular](https://www.singular.uni-kl.de/index.php.html).
+Below is a runtime comparison (in seconds) of `f4ncgb` (version 1.1.2) with the state-of-the-art tool [Singular](https://www.singular.uni-kl.de/index.php.html).
 All benchmarks are part of the [SymbolicData project](https://symbolicdata.github.io).
 
 | Example | Singular | f4ncgb (1 core) | f4ncgb (2 cores) | f4ncgb (4 cores) | f4ncgb (8 cores) |
 | --- | --- | --- | --- | --- | --- |
-| 4nilp5s-10 | 1 217.19 | 37.47 | 28.76 | 22.99 | 21.85 |
-| braid3-16 | 18 314.52 | 16.47 | 10.25 | 6.80 | 5.30 |
-| braidX-18 | >43 200 | 341.51 | 286.92 | 161.20 | 89.47 |
-| braidXY-12 | 1 608.16 | 15.08 | 10.34 | 8.03 | 6.86 |
-| holt_G3562h-17 | >43 200 | 243.45 | 145.54 | 96.16 | 71.01 |
-| lascala_neuh-13 | 166.95 | 1.11 | 1.17 | 1.07 | 1.08 |
-| lv2d10-100 | >43 200 | 10.22 | 10.72 | 10.24 | 10.69 |
-| malle_G12h-100 | 3 934.29 | 44.86 | 45.68 | 45.01 | 44.79 |
-| serre-e6-17 | 107.46 | 53.65 | 53.67 | 53.30 | 52.89 |
-| serre-ha11-17 | 94.85 | 12.92 | 11.48 | 10.65 | 10.82 |
+| 4nilp5s-10 | 1 217.19 | 29.51 | 20.56 | 17.00 | 13.61 |
+| braid3-16 | 18 314.52 | 9.89 | 6.69 | 4.85 | 3.90 |
+| braidX-18 | >43 200 | 139.04 | 78.61 | 53.42 | 37.23 |
+| braidXY-12 | 1 608.16 | 10.52 | 8.19 | 6.98 | 6.56 |
+| holt_G3562h-17 | >43 200 | 43.26 | 39.52 | 38.48 | 37.26 |
+| lascala_neuh-13 | 166.95 | 0.99 | 0.97 | 1.02 | 0.93 |
+| lv2d10-100 | >43 200 | 9.56 | 10.40 | 9.55 | 9.87 |
+| malle_G12h-100 | 3 934.29 | 35.66 | 36.33 | 35.06 | 35.89 |
+| serre-e6-17 | 107.46 | 40.51 | 41.36 | 41.23 | 41.64 |
+| serre-ha11-17 | 94.85 | 9.04 | 8.18 | 7.70 | 8.28 |
 
 
 # Table of Contents
@@ -161,7 +161,7 @@ DIMACS format that SAT-solvers use. We provide a simplified EBNF below.
 
 This should produce the following output:
 
-    Running 17 test cases...
+    Running 21 test cases...
      
     *** No errors detected
 
