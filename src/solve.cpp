@@ -1,6 +1,5 @@
 #include "solve.hpp"
 
-#include <filesystem>
 #include <sstream>
 
 #include <boost/mp11/algorithm.hpp>
@@ -26,10 +25,6 @@ struct f4_base {
     = 0;
   virtual void print_read_problem() = 0;
   virtual void print_parameters(const std::string& output_name) = 0;
-
-#ifdef F4NCGB_ENABLE_STORE_DUMP
-  virtual void set_dump_paths(std::string path) = 0;
-#endif
 };
 
 template<std::size_t Nblocks, typename V>
@@ -110,13 +105,6 @@ struct f4_wrapper : f4_base {
     else
       msg("==== Starting Gröbner Basis Computation ====");
   }
-
-#ifdef F4NCGB_ENABLE_STORE_DUMP
-  void set_dump_paths(std::string path) override {
-    algo.mons.set_binary_dump_path(std::filesystem::path(path + "_mons.bin"));
-    algo.poly.set_binary_dump_path(std::filesystem::path(path + "_poly.bin"));
-  }
-#endif
 };
 
 int
@@ -152,11 +140,6 @@ f4ncgb_main(parser_context& context,
       if(run.print_read_problem) {
         algo.print_read_problem();
       }
-
-#ifdef F4NCGB_ENABLE_STORE_DUMP
-      algo.set_dump_paths(
-        std::filesystem::path(context.get_filename()).filename().string());
-#endif
 
       if(run.stats_print_function) {
         *run.stats_print_function = [&algo]() {
@@ -198,7 +181,7 @@ f4ncgb_main(parser_context& context,
         *run.stats_print_function = []() {};
       }
 
-#if defined(__has_feature) && NDEBUG && !defined(F4NCGB_ENABLE_STORE_DUMP)
+#if defined(__has_feature) && NDEBUG
 #if !__has_feature(address_sanitizer)
       if(run.leak_memory)
         algo_ptr.release();

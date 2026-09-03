@@ -5,11 +5,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <format>
-#include <fstream>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <new>
+#include <ostream>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -23,12 +23,6 @@
 
 #include <boost/container_hash/hash.hpp>
 #include <boost/unordered/unordered_flat_map.hpp>
-
-#include "diagnostics.hpp"
-
-#ifdef F4NCGB_ENABLE_STORE_TRACE
-#include "store_tracer.hpp"
-#endif
 
 #ifdef __linux__
 #include <sys/mman.h>
@@ -180,18 +174,6 @@ class store {
     }
   };
 
-#ifdef F4NCGB_ENABLE_STORE_DUMP
-  std::string dump_output_path_;
-  void dump_to_binary() {
-    const size_t bytes = static_cast<size_t>(size_) * unit;
-    msg("Dumping %zu bytes to %s", bytes, dump_output_path_.c_str());
-    std::ofstream of(dump_output_path_, std::ios::binary | std::ios::out);
-    for(size_t i = 0; i < bytes; ++i) {
-      of << static_cast<uint8_t>(pool_[i]);
-    }
-  }
-#endif
-
   friend B;
 
   static_assert(
@@ -254,8 +236,6 @@ class store {
     return std::pair<M&, V*>(*metadata, vv);
   }
 
-  inline I scratch_id() const { return size_ + 1; }
-
   inline I insert_scratch() {
     I id = size_;
 
@@ -296,13 +276,7 @@ class store {
     pool_.reset(allocate_pool(capacity(), pool_capacity_));
     usable_ = std::min(pool_capacity_, capacity());
   }
-  ~store() {
-#ifdef F4NCGB_ENABLE_STORE_DUMP
-    if(dump_output_path_ != "") {
-      dump_to_binary();
-    }
-#endif
-  }
+  ~store() {}
 
   inline M& get_metadata(I id) noexcept {
     if(id == 0) {
@@ -331,10 +305,6 @@ class store {
     size_t len = get_length(id);
 
     const V* start = get_value_from_id(id - 1);
-
-#ifdef F4NCGB_ENABLE_STORE_TRACE
-    reinterpret_cast<B*>(const_cast<self*>(this))->tracer_.access(id);
-#endif
 
     return std::span<const V>(start, len);
   }
@@ -416,10 +386,6 @@ class store {
   pos_iterator begin() const { return pos_iterator(*this, 0); }
   pos_iterator end() const { return pos_iterator(*this, size_ + 1); }
   size_t size() const { return (size_t)std::distance(begin(), end()); }
-
-#ifdef F4NCGB_ENABLE_STORE_DUMP
-  void set_binary_dump_path(const std::string& p) { dump_output_path_ = p; }
-#endif
 };
 }
 }

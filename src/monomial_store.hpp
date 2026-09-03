@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "ambiguity.hpp"
+#include "diagnostics.hpp"
 #include "store.hpp"
 
 namespace f4ncgb {
@@ -25,10 +26,6 @@ class monomial_store : public store<monomial_store<M, V, I, Nblocks>, M, V, I> {
   friend base;
 
   using ambiguity_ = ambiguity<I>;
-
-#ifdef F4NCGB_ENABLE_STORE_TRACE
-  store_tracer tracer_ = store_tracer("monomial_store");
-#endif
 
   //  `tag` holds 32 bits of the word hash and doubles as the key the index is
   //  derived from, so growing the table never has to walk the words again.

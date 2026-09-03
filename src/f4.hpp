@@ -186,8 +186,6 @@ struct f4 {
   inline parse_res read_input(parser_context& context) {
     parse_res res = parse_rest_into_polynomial_store(
       context, poly, state.input_denoms, opts.num_vars);
-    // Print in case of doubt.
-    // write_all(std::cout, context, opts, poly);
     return res;
   }
   //------------------------------------------------------------------------------

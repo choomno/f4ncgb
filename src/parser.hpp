@@ -85,11 +85,6 @@ class parser_context {
                       parse_monomial_boundary_cb boundary_cb,
                       void* boundary_cb_userdata);
 
-  parse_res impl_sympoly(parse_add_cb add_cb,
-                         void* add_cb_userdata,
-                         parse_monomial_boundary_cb boundary_cb,
-                         void* boundary_cb_userdata);
-
   inline int current_c() const { return c; }
 
   inline int getc() {
@@ -177,10 +172,6 @@ class parser_context {
     return c != '-' && c != '/' && c != '*' && c != '+' && c != ',' && c != ' '
            && c != '\n' && c != '\r' && c != '\t' && c != '^';
   }
-  static inline bool sympoly_ident_filter(char c) {
-    return c != ' ' && c != '\n' && c != '\t' && c != '\r';
-  }
-
   template<typename Filter>
   inline const std::string& read_ident(Filter c_allowed) {
     ident = "";
@@ -204,15 +195,6 @@ class parser_context {
 
   static parser_symbolic_context::id read_numeric_var(parser_context& ctx) {
     return ctx.read_positive_int();
-  }
-  static parser_symbolic_context::id read_symbolic_var(parser_context& ctx) {
-    assert(ctx.has_symbols());
-    if(ctx.current_c() == '0') {
-      ctx.getc();// Swallow the 0.
-      return 0;
-    }
-    auto ident = ctx.read_ident(parser_context::sympoly_ident_filter);
-    return ctx.str_to_id(ident);
   }
 
   parse_res parse_msolve_end();
@@ -350,6 +332,4 @@ parse_rest_into_polynomial_store(parser_context& ctx,
   return parse_rest(ctx, add_cb, boundary_cb);
 }
 
-void
-dummy_parse_string(std::string s);
 }

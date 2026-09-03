@@ -464,28 +464,12 @@ parser_context::impl_poly_gen<&parser_context::read_numeric_var>(
   parse_monomial_boundary_cb boundary_cb,
   void* boundary_cb_userdata);
 
-template parse_res
-parser_context::impl_poly_gen<&parser_context::read_symbolic_var>(
-  parse_add_cb add_cb,
-  void* add_cb_userdata,
-  parse_monomial_boundary_cb boundary_cb,
-  void* boundary_cb_userdata);
-
 parse_res
 parser_context::impl_poly(parse_add_cb add_cb,
                           void* add_cb_userdata,
                           parse_monomial_boundary_cb boundary_cb,
                           void* boundary_cb_userdata) {
   return impl_poly_gen<&parser_context::read_numeric_var>(
-    add_cb, add_cb_userdata, boundary_cb, boundary_cb_userdata);
-}
-
-parse_res
-parser_context::impl_sympoly(parse_add_cb add_cb,
-                             void* add_cb_userdata,
-                             parse_monomial_boundary_cb boundary_cb,
-                             void* boundary_cb_userdata) {
-  return impl_poly_gen<&parser_context::read_symbolic_var>(
     add_cb, add_cb_userdata, boundary_cb, boundary_cb_userdata);
 }
 
@@ -522,30 +506,10 @@ parser_context::parse_header(solve_options& opts) {
                               parse_monomial_boundary_cb boundary_cb,
                               void* boundary_cb_userdata)>;
   impl_fun_type impl_fun = nullptr;
-  bool symbolic_vars = false;
 
   // Now the file must be one of our own new format types!
   getc();
-  if(c == 's') {
-    // File should read "p sympoly"
-    READ('y');
-    READ('m');
-    READ('p');
-    READ('o');
-    READ('l');
-    READ('y');
-    READ(' ');
-
-    impl_fun = [this](parse_add_cb add_cb,
-                      void* add_cb_userdata,
-                      parse_monomial_boundary_cb boundary_cb,
-                      void* boundary_cb_userdata) {
-      return impl_sympoly(
-        add_cb, add_cb_userdata, boundary_cb, boundary_cb_userdata);
-    };
-    init_symbols();
-    symbolic_vars = true;
-  } else if(c == 'p') {
+  if(c == 'p') {
     // File should read "p poly"
     READ('o');
     READ('l');
@@ -561,7 +525,7 @@ parser_context::parse_header(solve_options& opts) {
     };
   } else {
     return std::format("character {} is not a valid start for problem "
-                       "specifier, must be either s or p",
+                       "specifier, must be p",
                        c);
   }
 
@@ -586,55 +550,10 @@ parser_context::parse_header(solve_options& opts) {
   EXPECT('\n');
   getc();// Swallow the newline.
 
-  if(auto err = symbolic_vars
-                  ? read_blocks<&parser_context::read_symbolic_var>()
-                  : read_blocks<&parser_context::read_numeric_var>())
+  if(auto err = read_blocks<&parser_context::read_numeric_var>())
     return err;
 
   impl = impl_fun;
   return std::nullopt;
 }
-
-#ifdef __linux__
-void
-dummy_parse_string(std::string input) {
-  int add_cb_count = 0;
-  int boundary_cb_count = 0;
-
-  auto add_cb = [&add_cb_count](uint32_t i) {
-    (void)i;
-    if(add_cb_count++ > 10000000) {
-      assert(false);
-    }
-    return std::nullopt;
-  };
-  auto boundary_cb
-    = [&boundary_cb_count](long numerator, long denominator, bool is_rational) {
-        (void)numerator;
-        (void)denominator;
-        (void)is_rational;
-        if(boundary_cb_count++ > 10000000) {
-          assert(false);
-        }
-        return std::nullopt;
-      };
-
-  FILE* f = fmemopen((void*)input.c_str(), input.size(), "r");
-
-  if(!f) {
-    std::cout << "Could not make a memory-backed file. Error: "
-              << strerror(errno) << std::endl;
-    exit(1);
-  }
-
-  parser_context ctx(f);
-  solve_options opts;
-
-  parse(ctx, opts, add_cb, boundary_cb);
-}
-#else
-void
-dummy_parse_string(std::string) {}
-#endif
-
 }

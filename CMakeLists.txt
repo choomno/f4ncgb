@@ -10,14 +10,12 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 option(ENABLE_PROFILING "Enable tracking statistics" ON)
 option(SHARED_LIB "Build the f4ncgb library shared instead of static" OFF)
 option(ENABLE_FUZZER "Enable building the fuzzer, if available" OFF)
-option(ENABLE_STORE_TRACE "Enable a (very expensive) trace of each access (operator[]) into a store." OFF)
-option(ENABLE_STORE_DUMP "Enable a (very expensive) dump when deconstructing a store." OFF)
 option(ENABLE_NATIVE "Enable -march=native to target the host CPU (creates non-portable binaries)" ON)
 option(ENABLE_TEST "Build f4ncgb_test program" ON)
 option(ENABLE_SIGNAL "Enable signal handling for printing statistics" ON)
 option(WIDE_MATRIX_OFFSETS "Address matrices with more than 2^32 nonzeros, at the cost of 8 bytes instead of 4 per row for two offset arrays. Off by default; without it those counts are checked and the program stops rather than wrapping." OFF)
 
-set(MAX_BLOCKS 16 CACHE STRING "Maximum number of blocks to compile for. Must be integral. Changes compilation time (duplicates implementation for each block).")
+set(MAX_BLOCKS 8 CACHE STRING "Maximum number of blocks to compile for. Must be integral. Changes compilation time (duplicates implementation for each block).")
 
 set(F4NCGB_SRCS
   src/api.cpp
@@ -39,10 +37,6 @@ set(F4NCGB_TEST_SRCS
 set(F4NCGB_TARGETS
   src/f4ncgb.cpp
 )
-
-if(ENABLE_STORE_TRACE)
-  list(APPEND F4NCGB_SRCS src/store_tracer.cpp)
-endif()
 
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/config.hpp.in" "${CMAKE_CURRENT_BINARY_DIR}/config.hpp")
 
@@ -130,20 +124,6 @@ if(WIDE_MATRIX_OFFSETS)
   target_compile_definitions(f4ncgb PUBLIC F4NCGB_WIDE_MATRIX_OFFSETS)
 else()
   message(STATUS "Matrix offsets are 32 bit (see WIDE_MATRIX_OFFSETS)")
-endif()
-
-if(ENABLE_STORE_TRACE)
-  message(STATUS "Store tracing is enabled")
-  target_compile_definitions(f4ncgb PUBLIC F4NCGB_ENABLE_STORE_TRACE)
-else()
-  message(STATUS "Store tracing is disabled")
-endif()
-
-if(ENABLE_STORE_DUMP)
-  message(STATUS "Store dumping is enabled")
-  target_compile_definitions(f4ncgb PUBLIC F4NCGB_ENABLE_STORE_DUMP)
-else()
-  message(STATUS "Store dumping is disabled")
 endif()
 
 if(ENABLE_SIGNAL)

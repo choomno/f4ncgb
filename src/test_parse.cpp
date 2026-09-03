@@ -51,9 +51,8 @@ BOOST_AUTO_TEST_CASE(parse_files) {
   std::filesystem::path dir = *dir_optional;
 
   for(auto& e : std::filesystem::directory_iterator(dir)) {
-    if(e.path().extension() != ".ms" && e.path().extension() != ".poly"
-       && e.path().extension() != ".sympoly") {
-      // Only ms, poly, and sympoly files should be tested. Others may
+    if(e.path().extension() != ".ms" && e.path().extension() != ".poly") {
+      // Only ms and poly files should be tested. Others may
       // be temporaries.
       BOOST_TEST_MESSAGE("Skipping file " << e << " because of extension "
                                           << e.path().extension());
@@ -80,10 +79,6 @@ BOOST_AUTO_TEST_CASE(parse_files) {
                                                  << " did lead to an error:\n"
                                                  << *ret);
       }
-      // Can also output the parsed files:
-      //
-      // if(e.path().extension() == ".ms")
-      //   ctx.to_msolve(std::cout, ps);
     }
   }
 }

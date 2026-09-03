@@ -210,9 +210,10 @@ fuzz_parser(std::string input) {
   }
 
   parser_context ctx(f);
+  solve_options opts;
 
   try {
-    parse(ctx, add_cb, boundary_cb);
+    parse(ctx, opts, add_cb, boundary_cb);
   } catch(std::runtime_error& e) {
     EXPECT_LT(add_cb_count, 1000000);
     EXPECT_LT(boundary_cb_count, 1000000);

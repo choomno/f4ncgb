@@ -14,10 +14,6 @@
 #include <boost/program_options.hpp>
 #include <config.hpp>
 
-#ifdef F4NCGB_ENABLE_STORE_TRACE
-#include "store_tracer.hpp"
-#endif
-
 #ifdef F4NCGB_ENABLE_SIGNAL
 #include <csignal>
 #endif
@@ -88,7 +84,7 @@ main(int argc, char** argv) {
     ("version", "produce version message")
     ("help,h", "produce help message")
     ("expanded-proof,e",  po::value<bool>(&expanded_proof)->default_value(false), "Whether the proofs should be expanded and written in terms of the input. Requires proof logging to be turned on.")
-    ("input,i", po::value<std::string>(&input_name)->default_value(""), "Set the input file (either msolve, poly, or sympoly; switched according to content).")
+    ("input,i", po::value<std::string>(&input_name)->default_value(""), "Set the input file (either msolve or poly; switched according to content).")
     ("maxiter,m", po::value<size_t>(&maxiter)->default_value(10), "Maximal number of iterations of the F4-algorithm to be performed.")
     ("maxdeg,d", po::value<size_t>(&maxdeg)->default_value(UINT_MAX), "Maximal degree of ambiguities that are considered.")
     ("output,o", po::value<std::string>(&output_name)->default_value(""), "Set the output file.")
@@ -127,10 +123,6 @@ main(int argc, char** argv) {
   int res = 0;
 
   std::filesystem::path in = input_name;
-
-#ifdef F4NCGB_ENABLE_STORE_TRACE
-  f4ncgb::store_tracer::set_prefix(in.filename());
-#endif
 
   parser_context context;
   solve_options opts;

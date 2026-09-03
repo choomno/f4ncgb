@@ -75,8 +75,7 @@ These are the provided options (also visible from `--help`:
 -   **`--expanded-proof`, `-e`:** Whether the proofs should be expanded
     and written in terms of the input. Requires proof logging to be
     turned on
--   **`--input`, `-i`:** Set the input file (either msolve, poly, or
-    sympoly)
+-   **`--input`, `-i`:** Set the input file (either msolve or poly)
 -   **`--maxiter`, `-m`:** Maximal number of iterations of the
     F4-algorithm to be performed (default: 10)
 -   **`--maxdeg`, `-d`:** Maximal degree of ambiguities that are
@@ -94,7 +93,7 @@ These are the provided options (also visible from `--help`:
 ## `msolve` Input Format
 
 This format is compatible to the input format of [msolve](https://msolve.lip6.fr/). We provide
-a simplified EBNF below.
+a simplified EBNF below. See also the files in `test_inputs` for examples.
 
     input          := var_list EOL
                       characteristic EOL
@@ -161,7 +160,7 @@ DIMACS format that SAT-solvers use. We provide a simplified EBNF below.
 
 This should produce the following output:
 
-    Running 21 test cases...
+    Running 23 test cases...
      
     *** No errors detected
 

@@ -123,14 +123,6 @@ BOOST_AUTO_TEST_CASE(simple_polynomials) {
   // An absent factor is the empty monomial, id 0
   I::idx p3 = p.multiply_front_and_back(0, p2, s.getid({ 1, 2 }));
 
-  // Printing is also possible:
-
-  //   std::cout << "p1: " << p1 << ", p2: " << p2 << ", p3: " << p3
-  //             << std::endl;
-  //
-  //   s.print(std::cout);
-  //   p.print(std::cout);
-
   BOOST_TEST(p.get_monomial_id(p3, 0) == s.getid({ 3, 4, 1, 2 }));
 
   // A factor on both sides, which is the only shape the algorithm itself uses

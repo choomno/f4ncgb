@@ -35,10 +35,6 @@ class polynomial_store
                  I,
                  I> {
 
-#ifdef F4NCGB_ENABLE_STORE_TRACE
-  store_tracer tracer_ = store_tracer("polynomial_store");
-#endif
-
   public:
   using self = polynomial_store<PM, MM, V, I, C, Nblocks>;
   using base = store<polynomial_store<PM, MM, V, I, C, Nblocks>,
