@@ -145,6 +145,10 @@ class monomial_store : public store<monomial_store<M, V, I, Nblocks>, M, V, I> {
   public:
   monomial_store() { table_rehash(1024); }
 
+  size_t table_slots() const { return table_.size(); }
+  size_t table_used() const { return table_size_; }
+  size_t table_bytes() const { return table_.size() * sizeof(word_entry); }
+
   inline I getid(const std::span<const V>& v) {
     F4NCGB_PROFILE(gstats.store_find_calls++);
     if(v.size() == 0)

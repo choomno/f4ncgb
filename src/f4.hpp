@@ -944,6 +944,28 @@ struct f4 {
     columns.swap(sorted_columns);
   }
 
+  void permute_reducer_rows() {
+    // A proof run appends a transformation column per row, so the matrix
+    // cannot borrow copies.
+    if(state.proof_level > 0)
+      return;
+
+    csr_indices tmp;
+    tmp.data.reserve(idxs_red.data.size());
+    tmp.row_start.reserve(idxs_red.rows() + 1);
+
+    for(size_t i : red_order) {
+      const auto row = idxs_red[i];
+      tmp.data.insert(tmp.data.end(), row.begin(), row.end());
+      tmp.end_row();
+    }
+
+    idxs_red.data.swap(tmp.data);
+    idxs_red.row_start.swap(tmp.row_start);
+    std::iota(red_order.begin(), red_order.end(), size_t(0));
+  }
+  //------------------------------------------------------------------------------
+
   void prepare_matrix() {
 
     sort_columns();
@@ -957,6 +979,7 @@ struct f4 {
     // sort spolies and reducers
     sort_rows(spolies, extended_spolies, idxs_spol);
     sort_rows(reducers, extended_reducers, idxs_red, &red_order);
+    permute_reducer_rows();
 
     // collect entries
     entries_spol.clear();

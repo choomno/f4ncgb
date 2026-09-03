@@ -69,6 +69,8 @@ struct probe_map {
   }
 
   size_t size() const { return size_; }
+  size_t slots() const { return entries_.size(); }
+  size_t bytes() const { return entries_.capacity() * sizeof(entry); }
 
   private:
   // Linear probing degrades sharply near a full table, and eight entries share

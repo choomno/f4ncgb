@@ -845,3 +845,70 @@ BOOST_AUTO_TEST_CASE(batched_products_match_term_at_a_time) {
     }
   }
 }
+
+// -----------------------------------------------------------------------------
+// The open-addressed tables lose entries rather than crashing if a rehash goes
+// wrong, so growth past several doublings is worth testing directly.
+
+BOOST_AUTO_TEST_CASE(probe_map_survives_growth) {
+  internal::probe_map m;
+  m.reset(16);
+
+  // well past several growth points, so the rehash path is exercised
+  constexpr uint32_t n = 300000;
+  for(uint32_t i = 0; i < n; i++) {
+    auto [slot, inserted] = m.find_or_insert(i, i * 7);
+    BOOST_REQUIRE(inserted);
+    BOOST_REQUIRE(*slot == i * 7);
+  }
+  BOOST_TEST(m.size() == n);
+
+  // nothing was lost or duplicated by a rehash
+  for(uint32_t i = 0; i < n; i++) {
+    auto [slot, inserted] = m.find_or_insert(i, 0);
+    BOOST_REQUIRE(!inserted);
+    BOOST_REQUIRE(*slot == i * 7);
+  }
+  BOOST_TEST(m.size() == n);
+
+  // and reset really empties it, whether or not the buffer is reused
+  m.reset(n);
+  BOOST_TEST(m.size() == 0u);
+  auto [slot, inserted] = m.find_or_insert(5, 99);
+  BOOST_TEST(inserted);
+  BOOST_TEST(*slot == 99u);
+}
+
+BOOST_AUTO_TEST_CASE(monomial_store_survives_table_growth) {
+  using I = impl<>;
+  I::monomial_store s;
+
+  // i in base 5 over eight letters: 5^8 distinct words, so every one of these
+  // is genuinely new and the table has to rehash several times
+  constexpr uint32_t n = 200000;
+  std::vector<uint8_t> w(8);
+  auto word_of = [&w](uint32_t i) {
+    for(size_t k = 0; k < 8; k++) {
+      w[k] = static_cast<uint8_t>(1 + (i % 5));
+      i /= 5;
+    }
+    return w;
+  };
+
+  std::vector<uint32_t> ids;
+  ids.reserve(n);
+  for(uint32_t i = 0; i < n; i++)
+    ids.push_back(s.getid(word_of(i)));
+
+  // distinct words got distinct ids
+  auto sorted = ids;
+  std::sort(sorted.begin(), sorted.end());
+  sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+  BOOST_TEST(sorted.size() == ids.size());
+
+  // and nothing was lost by a rehash: every word still finds its own id
+  for(uint32_t i = 0; i < n; i++)
+    BOOST_REQUIRE(s.getid(word_of(i)) == ids[i]);
+  BOOST_TEST(s.table_used() == ids.size());
+  BOOST_TEST(s.table_slots() > s.table_used());
+}

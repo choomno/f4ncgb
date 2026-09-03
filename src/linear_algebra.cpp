@@ -61,7 +61,15 @@ void inline set_up_reducer_mat(la_context& la,
   check_offset(unique_nnz, "number of stored reducer coefficients");
   check_fits(ncols, UINT32_MAX, "width of the reducer matrix");
 
-  sparse_mat_ro_init(red_mat, nrows, ncols, nnz, unique_nnz);
+  const bool borrow_indices = state.proof_level == 0;
+
+  sparse_mat_ro_init(red_mat,
+                     nrows,
+                     ncols,
+                     nnz,
+                     unique_nnz,
+                     borrow_indices ? const_cast<uint32_t*>(idxs.data.data())
+                                    : nullptr);
   double ratio = nnz > 0 ? (100. * unique_nnz) / nnz : 0;
   if(verbose > 2)
     msg("Reducer matrix has size (%d, %d) (%.1f%% entries actually stored)",
@@ -78,12 +86,16 @@ void inline set_up_reducer_mat(la_context& la,
 
   for(size_t i = 0; i < nrows; i++) {
     const auto row = idxs[order[i]];
-    index_start[i] = static_cast<mat_offset_t>(idx_k);
     row_nnz[i] = row.size();
 
-    // store indices
-    for(const auto j : row)
-      indices[idx_k++] = j;
+    if(borrow_indices) {
+      index_start[i] = idxs.row_start[order[i]];
+      idx_k += row.size();
+    } else {
+      index_start[i] = static_cast<mat_offset_t>(idx_k);
+      for(const auto j : row)
+        indices[idx_k++] = j;
+    }
 
     // store coeff offset
     if(i == ref_row[i]) {

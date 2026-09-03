@@ -62,6 +62,11 @@ struct csr_indices {
   }
 
   size_t rows() const { return row_start.size() - 1; }
+  size_t nnz() const { return data.size(); }
+  size_t bytes() const {
+    return data.capacity() * sizeof(uint32_t)
+           + row_start.capacity() * sizeof(mat_offset_t);
+  }
   std::span<const uint32_t> operator[](size_t i) const {
     return std::span<const uint32_t>(data.data() + row_start[i],
                                      row_start[i + 1] - row_start[i]);

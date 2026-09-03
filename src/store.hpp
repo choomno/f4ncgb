@@ -205,9 +205,7 @@ class store {
   protected:
   static constexpr size_t unit = alignof(M);
 
-  consteval static size_t capacity() {
-    return addressable_capacity<I, unit>();
-  }
+  consteval static size_t capacity() { return addressable_capacity<I, unit>(); }
 
   constexpr inline std::byte* slot(I id) const {
     return pool_.get() + static_cast<size_t>(id) * unit;
@@ -220,9 +218,8 @@ class store {
     return const_cast<self*>(this)->get_metadata_from_id(id);
   }
   constexpr inline V* get_value_from_id(I id) {
-    return reinterpret_cast<V*>(
-      std::assume_aligned<alignof(V)>(boost::alignment::align_up(
-        slot(id) + sizeof(M), alignof(V))));
+    return reinterpret_cast<V*>(std::assume_aligned<alignof(V)>(
+      boost::alignment::align_up(slot(id) + sizeof(M), alignof(V))));
   }
   constexpr inline const V* get_value_from_id(I id) const {
     return const_cast<self*>(this)->get_value_from_id(id);
@@ -241,7 +238,7 @@ class store {
     return sizeof(M) + alignof(V) + space * sizeof(V) + unit;
   }
 
-  // Work on the current tip but do not commit anything. 
+  // Work on the current tip but do not commit anything.
   // The tip can later be committed using insert_scratch.
   inline std::pair<M&, V*> new_scratch(I space = 32) {
     if(static_cast<size_t>(size_) * unit + entry_bound(space) > usable_)
@@ -322,6 +319,10 @@ class store {
   }
 
   inline void reset() { size_ = real_size_; }
+
+  size_t bytes() const { return static_cast<size_t>(size_) * unit; }
+  size_t live_bytes() const { return static_cast<size_t>(real_size_) * unit; }
+  size_t inserted() const { return inserted_count_; }
 
   inline const std::span<const V> operator[](I id) const noexcept {
     if(id == 0)

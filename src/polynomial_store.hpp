@@ -209,6 +209,9 @@ class polynomial_store
     return o;
   }
 
+  public:
+  size_t coeff_bytes() const { return cpool_size_ * sizeof(C); }
+
   protected:
   monomial_store_& store_;
   std::unique_ptr<std::byte[], typename base::pool_deleter> cpool_;

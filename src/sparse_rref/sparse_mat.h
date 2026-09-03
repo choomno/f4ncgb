@@ -23,6 +23,7 @@ struct sparse_mat_ro_struct {
   uint32_t* row_nnz;
   uint32_t* indices;
   unsigned char* trace;
+  bool owns_indices;
 };
 
 template<typename T>
@@ -51,23 +52,26 @@ sparse_mat_ro_init(sparse_mat_ro_t<T> ro,
                    ulong nrow,
                    ulong ncol,
                    ulong nnz,
-                   ulong unique_nnz) {
+                   ulong unique_nnz,
+                   uint32_t* borrowed = NULL) {
   ro->nrow = nrow;
   ro->ncol = ncol;
   ro->trace_len = 0;
   ro->unique_nnz = unique_nnz;
   ro->trace = NULL;
+  ro->owns_indices = (borrowed == NULL);
 
   if(nrow > 0) {
     ro->row_start = s_malloc<mat_offset_t>(nrow);
     ro->index_start = s_malloc<mat_offset_t>(nrow);
     ro->row_nnz = s_malloc<uint32_t>(nrow);
-    ro->indices = s_malloc<uint32_t>(nnz);
+    ro->indices = borrowed ? borrowed : s_malloc<uint32_t>(nnz);
   } else {
     ro->row_start = NULL;
     ro->index_start = NULL;
     ro->row_nnz = NULL;
     ro->indices = NULL;
+    ro->owns_indices = true;
   }
 }
 
@@ -85,7 +89,8 @@ sparse_mat_ro_clear(sparse_mat_ro_t<T> ro) {
   s_free(ro->row_start);
   s_free(ro->index_start);
   s_free(ro->row_nnz);
-  s_free(ro->indices);
+  if(ro->owns_indices)
+    s_free(ro->indices);
   s_free(ro->trace);
   ro->nrow = 0;
   ro->ncol = 0;

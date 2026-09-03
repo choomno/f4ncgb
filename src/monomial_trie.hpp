@@ -55,6 +55,20 @@ struct monomial_trie {
   size_t size() { return nodes.size(); }
   // -----------------------------------------------------------------
 
+  // Bytes held by the trie
+  size_t bytes() const {
+    size_t n = nodes.capacity() * sizeof(uint64_t)
+               + fail_link.capacity() * sizeof(uint64_t)
+               + min_word.capacity() * sizeof(word_ref)
+               + node_weight.capacity() * sizeof(uint32_t)
+               + match_buffer.capacity() * sizeof(match)
+               + walk_stack.capacity() * sizeof(std::pair<uint64_t, size_t>);
+    for(const auto& e : entered_by)
+      n += e.capacity() * sizeof(uint64_t);
+    return n;
+  }
+  // -----------------------------------------------------------------
+
   template<typename It>
   size_t inline walk_creating(It first, It last) {
     size_t cur_idx = 0;
