@@ -28,20 +28,20 @@ template<metadata_concept PM = internal::metadata<uint8_t>,
          value_concept V = uint8_t,
          typename I = uint32_t,
          typename C = coeff,
-         uint16_t Nblocks = 0>
+         bool GenericOrder = false>
 class polynomial_store
-  : public store<polynomial_store<PM, MM, V, I, C, Nblocks>,
+  : public store<polynomial_store<PM, MM, V, I, C, GenericOrder>,
                  polynomial_metadata<PM, I>,
                  I,
                  I> {
 
   public:
-  using self = polynomial_store<PM, MM, V, I, C, Nblocks>;
-  using base = store<polynomial_store<PM, MM, V, I, C, Nblocks>,
+  using self = polynomial_store<PM, MM, V, I, C, GenericOrder>;
+  using base = store<polynomial_store<PM, MM, V, I, C, GenericOrder>,
                      polynomial_metadata<PM, I>,
                      I,
                      I>;
-  using monomial_store_ = monomial_store<MM, V, I, Nblocks>;
+  using monomial_store_ = monomial_store<MM, V, I>;
   using monomial = monomial_store_::value_type;
   using metadata = polynomial_metadata<PM, I>;
 
@@ -50,7 +50,7 @@ class polynomial_store
 
   friend base;
 
-  constexpr static bool block_order = Nblocks > 1;
+  constexpr static bool generic_order = GenericOrder;
 
   consteval static size_t capacity() {
     return addressable_capacity<I, sizeof(C)>();
@@ -128,7 +128,7 @@ class polynomial_store
 
   inline void sort_polynomial(std::vector<std::pair<C, I>>& p) {
     std::stable_sort(p.begin(), p.end(), [this](const auto& a, const auto& b) {
-      return this->store_.template cmp<block_order>(b.second, a.second);
+      return this->store_.template cmp<generic_order>(b.second, a.second);
     });
   }
 

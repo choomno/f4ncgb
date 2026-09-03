@@ -73,6 +73,7 @@ class parser_context {
 
   template<parser_symbolic_context::id (*getV)(parser_context&)>
   parse_res read_blocks();
+  parse_res read_weights();
 
   template<parser_symbolic_context::id (*getV)(parser_context&)>
   parse_res impl_poly_gen(parse_add_cb add_cb,

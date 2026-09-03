@@ -1,3 +1,10 @@
+new
+==========
+
+## New Features
+
+  - Weighted monomial orders
+
 v1.1.2
 ==========
 

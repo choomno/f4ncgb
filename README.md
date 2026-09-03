@@ -96,10 +96,13 @@ This format is compatible to the input format of [msolve](https://msolve.lip6.fr
 a simplified EBNF below. See also the files in `test_inputs` for examples.
 
     input          := var_list EOL
+                      [ weights EOL ]
                       characteristic EOL
                       poly_list EOF .
     
     var_list       := ident { "," ident } .
+    
+    weights        := "w" nat { nat } .
     
     characteristic := int .
     
@@ -128,6 +131,7 @@ DIMACS format that SAT-solvers use. We provide a simplified EBNF below.
 
     input          := "p poly " nr_of_vars nr_of_blocks characteristic EOL
                       block { EOL block } EOL
+                      [ weights EOL ]
                       poly { EOL poly } EOF .
     
     nr_of_vars     := nat .
@@ -137,6 +141,8 @@ DIMACS format that SAT-solvers use. We provide a simplified EBNF below.
     characteristic := nat .
     
     block          := nat { nat } "0" .
+    
+    weights        := "w" nat { nat } .
     
     poly           := mon { "+" mon } 0 .
     
@@ -154,13 +160,24 @@ DIMACS format that SAT-solvers use. We provide a simplified EBNF below.
     
     digit          := "0"..."9" .
 
+## Weighted orders
+
+Both formats accept an optional `w` line carrying one positive integer weight per variable, in the order the variables are numbered. 
+
+    x,y,z
+    w 1 1 3
+    0
+    ...
+
+(Per default, all weights are 1.)
+
 # Tests
 
     ./f4ncgb_test
 
 This should produce the following output:
 
-    Running 23 test cases...
+    Running 30 test cases...
      
     *** No errors detected
 

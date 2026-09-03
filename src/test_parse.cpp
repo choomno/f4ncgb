@@ -82,3 +82,46 @@ BOOST_AUTO_TEST_CASE(parse_files) {
     }
   }
 }
+
+// parse_files only sees that a file parses; these check what the optional `w`
+// line actually put into the options.
+static solve_options
+parse_header_of(const std::string& name) {
+  auto dir_optional = get_parse_tests_location();
+  BOOST_REQUIRE(dir_optional.has_value());
+
+  parser_context ctx;
+  BOOST_REQUIRE(!ctx.open(*dir_optional / name).has_value());
+
+  solve_options opts;
+  auto err = ctx.parse_header(opts);
+  BOOST_REQUIRE_MESSAGE(!err.has_value(), err.value_or(""));
+  return opts;
+}
+
+BOOST_AUTO_TEST_CASE(parse_weights) {
+  const std::vector<uint32_t> w123{ 1, 2, 3 };
+  const solve_options ms = parse_header_of("weighted.ms");
+  BOOST_TEST(ms.num_vars == 3u);
+  BOOST_TEST(ms.num_blocks() == 1u);
+  BOOST_TEST(ms.weighted());
+  BOOST_TEST(!ms.default_order());
+  BOOST_TEST((ms.weights == w123));
+
+  // several blocks, extra spacing, and a variable that is itself called w
+  const std::vector<uint32_t> w4112{ 4, 1, 1, 2 };
+  const solve_options blocks = parse_header_of("weighted_blocks.ms");
+  BOOST_TEST(blocks.num_vars == 4u);
+  BOOST_TEST(blocks.num_blocks() == 2u);
+  BOOST_TEST((blocks.weights == w4112));
+
+  const std::vector<uint32_t> w511{ 5, 1, 1 };
+  const solve_options poly = parse_header_of("weighted.poly");
+  BOOST_TEST(poly.num_vars == 3u);
+  BOOST_TEST((poly.weights == w511));
+
+  // no w line leaves the weights empty and the fast path selected
+  const solve_options plain = parse_header_of("braid3_test.poly");
+  BOOST_TEST(!plain.weighted());
+  BOOST_TEST(plain.weights.empty());
+}

@@ -119,9 +119,6 @@ f4ncgb_set_blocks(f4ncgb_handle* h,
                   uint32_t* blocklengths) {
   REQUIRE_READY(h);
 
-  if(blockcount > F4NCGB_MAX_BLOCKS)
-    return "more blocks than current compilation allows";
-
   h->opts.blocks.resize(blockcount);
   uint32_t v = 1;
   for(size_t i = 0; i < blockcount; ++i) {
@@ -135,6 +132,21 @@ f4ncgb_set_blocks(f4ncgb_handle* h,
   // v has run past the last variable, which is numbered v - 1
   if(h->opts.num_vars == 0) {
     h->opts.num_vars = v - 1;
+  }
+
+  return nullptr;
+}
+
+extern "C" const char*
+f4ncgb_set_weights(f4ncgb_handle* h,
+                   uint32_t nweights,
+                   const uint32_t* weights) {
+  REQUIRE_READY(h);
+
+  h->opts.weights.assign(weights, weights + nweights);
+
+  if(h->opts.num_vars == 0) {
+    h->opts.num_vars = nweights;
   }
 
   return nullptr;
@@ -236,9 +248,9 @@ f4ncgb_solve_intern_(f4ncgb_handle* h,
       for(uint32_t v : std::get<2>(mono))
         if(v == 0 || v > h->opts.num_vars)
           return F4NCGB_ARGERROR;
-  if(h->opts.num_blocks() > F4NCGB_MAX_BLOCKS)
-    return F4NCGB_ARGERROR;
   if(h->opts.validate_blocks())
+    return F4NCGB_ARGERROR;
+  if(h->opts.validate_weights())
     return F4NCGB_ARGERROR;
   if(h->opts.characteristic > 2147483647l)// 2^31 -1
     return F4NCGB_ARGERROR;

@@ -27,9 +27,9 @@ struct f4_base {
   virtual void print_parameters(const std::string& output_name) = 0;
 };
 
-template<std::size_t Nblocks, typename V>
+template<bool GenericOrder, typename V>
 struct f4_wrapper : f4_base {
-  f4<Nblocks, V> algo;
+  f4<GenericOrder, V> algo;
 
   f4_wrapper(parser_context& context, const solve_options& opts)
     : algo(context, opts) {}
@@ -58,6 +58,13 @@ struct f4_wrapper : f4_base {
     else
       out_name += output_name;
 
+    // weighted variables are shown as `x(w)`.
+    auto print_var = [this, &opts](std::ostream& o, size_t v) -> void {
+      this->algo.context.var_to_ostream(o, v);
+      if(opts.weighted())
+        o << "(" << opts.weights[v - 1] << ")";
+    };
+
     std::ostringstream mon_order;
     mon_order << "Monomial order:    ";
     bool first = true;
@@ -65,7 +72,7 @@ struct f4_wrapper : f4_base {
       for(size_t v = 1; v <= opts.num_vars; v++) {
         if(!first)
           mon_order << " < ";
-        algo.context.var_to_ostream(mon_order, v);
+        print_var(mon_order, v);
         first = false;
       }
     } else {
@@ -74,7 +81,7 @@ struct f4_wrapper : f4_base {
         for(auto v : opts.block(i)) {
           if(!first)
             mon_order << " < ";
-          algo.context.var_to_ostream(mon_order, v);
+          print_var(mon_order, v);
           first = false;
         }
         if(i < opts.num_blocks() - 1)
@@ -112,17 +119,20 @@ f4ncgb_main(parser_context& context,
             const solve_options& opts,
             const run_options& run) {
 
-  return boost::mp11::mp_with_index<F4NCGB_MAX_BLOCKS + 1>(
-    opts.num_blocks(), [&context, &opts, &run](auto Nblocks) -> int {
+  // two instantiations: one for the default order, one for the others
+  return boost::mp11::mp_with_index<2>(
+    opts.default_order() ? 0 : 1, [&context, &opts, &run](auto Generic) -> int {
+      constexpr bool GenericOrder = decltype(Generic)::value != 0;
+
       std::unique_ptr<f4_base> algo_ptr;
       size_t nvars = opts.num_vars;
 
       if(nvars < std::numeric_limits<uint8_t>::max()) {
         algo_ptr
-          = std::make_unique<f4_wrapper<Nblocks, uint8_t>>(context, opts);
+          = std::make_unique<f4_wrapper<GenericOrder, uint8_t>>(context, opts);
       } else if(nvars < std::numeric_limits<uint16_t>::max()) {
         algo_ptr
-          = std::make_unique<f4_wrapper<Nblocks, uint16_t>>(context, opts);
+          = std::make_unique<f4_wrapper<GenericOrder, uint16_t>>(context, opts);
       } else {
         die(31, "Too many variables. At most 2^16-1 supported.");
       }

@@ -20,8 +20,7 @@ using monomial = std::tuple<long, long, std::vector<uint8_t>>;
 using polynomial = std::vector<monomial>;
 
 Domain<std::vector<std::vector<uint8_t>>>
-UniqueAcrossVectors(uint8_t max_value = 254,
-                    size_t max_vectors = F4NCGB_MAX_BLOCKS - 1) {
+UniqueAcrossVectors(uint8_t max_value = 254, size_t max_vectors = 15) {
   auto number_of_values = InRange<uint8_t>(2, max_value);
 
   return Map(

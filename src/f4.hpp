@@ -4,6 +4,7 @@
 #include <bit>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <ostream>
@@ -44,15 +45,16 @@ struct metadata_polynomial {
 
 //------------------------------------------------------------------------------
 
-template<size_t Nblocks,
+template<bool GenericOrder,
          internal::value_concept V = uint8_t,
          typename I = uint32_t,
          typename C = coeff>
 struct f4 {
   using MM = metadata_monomial;
   using PM = metadata_polynomial;
-  using monomial_store = internal::monomial_store<MM, V, I, Nblocks>;
-  using polynomial_store = internal::polynomial_store<PM, MM, V, I, C, Nblocks>;
+  using monomial_store = internal::monomial_store<MM, V, I>;
+  using polynomial_store
+    = internal::polynomial_store<PM, MM, V, I, C, GenericOrder>;
 
   using monomial = std::span<const V>;
   using mon_id = I;
@@ -90,7 +92,8 @@ struct f4 {
   bool tracer = true;
   bool constant_flag = false;
 
-  static constexpr bool block_order = Nblocks > 1;
+  // anything but the default unweighted deglex
+  static constexpr bool generic_order = GenericOrder;
 
   std::ofstream proof_file;
 
@@ -115,7 +118,7 @@ struct f4 {
       = std::max<size_t>(1, static_cast<size_t>(std::bit_width(opts.num_vars)));
     key_packed = 48 / key_bits;
 
-    mons.set_blocks(opts.block_sizes());
+    mons.set_order(opts.block_sizes(), opts.weights);
 
     if(opts.threads > 1)
       pool = std::make_unique<BS::thread_pool<BS::none>>(opts.threads);
@@ -384,7 +387,7 @@ struct f4 {
     std::sort(crit_pairs.begin(),
               crit_pairs.end(),
               [this](const auto& a, const auto& b) {
-                return this->mons.template cmp<block_order>(a.lm(), b.lm());
+                return this->mons.template cmp<generic_order>(a.lm(), b.lm());
               });
   }
   //------------------------------------------------------------------------------
@@ -408,7 +411,7 @@ struct f4 {
         return a.degree() < b.degree();
       if(a.j() != b.j())
         return a.j() < b.j();
-      return this->mons.template cmp<block_order>(a.aj(), b.aj());
+      return this->mons.template cmp<generic_order>(a.aj(), b.aj());
     };
     std::sort(new_amb.begin(), new_amb.end(), cmp);
 
@@ -459,6 +462,13 @@ struct f4 {
     }
   }
   //------------------------------------------------------------------------------
+  inline I amb_degree(uint64_t d) const {
+    if(d > std::numeric_limits<I>::max())
+      throw internal::length_overrun_exception(d,
+                                               std::numeric_limits<I>::max());
+    return static_cast<I>(d);
+  }
+  //------------------------------------------------------------------------------
   std::vector<std::pair<mon_id, size_t>> overlaps;
   std::vector<std::pair<mon_id, size_t>> inclusions;
   std::vector<ambiguity_> new_amb;
@@ -478,7 +488,12 @@ struct f4 {
       // last k elements of m = AB form overlap B
       for(const auto& [j, k] : overlaps) {
         bc = mons[j];
-        I d = ab.size() + bc.size() - k;
+        I d;
+        if constexpr(generic_order)
+          d = amb_degree(mons.weighted_degree(ab)
+                         + mons.weighted_degree(bc.last(bc.size() - k)));
+        else
+          d = static_cast<I>(ab.size() + bc.size() - k);
         if(d > maxdeg)
           continue;
         I aj = mons.getid(ab.first(ab.size() - k));
@@ -494,7 +509,12 @@ struct f4 {
       // k determines where B starts in m = BC
       for(const auto& [j, k] : overlaps) {
         ab = mons[j];
-        I d = ab.size() + bc.size() - k;
+        I d;
+        if constexpr(generic_order)
+          d = amb_degree(mons.weighted_degree(ab)
+                         + mons.weighted_degree(bc.last(bc.size() - k)));
+        else
+          d = static_cast<I>(ab.size() + bc.size() - k);
         if(d > maxdeg)
           continue;
         I ai = mons.getid(ab.first(ab.size() - k));
@@ -507,7 +527,12 @@ struct f4 {
     {
       F4NCGB_TIME(inclusion);
       // inclusions with m = ABC
-      I d = m.size();
+      const size_t len = m.size();
+      I d;
+      if constexpr(generic_order)
+        d = amb_degree(mons.weighted_degree(m));
+      else
+        d = static_cast<I>(len);
       if(d <= maxdeg) {
         // k determines where B starts in m = ABC
         for(const auto& [j, k] : inclusions) {
@@ -515,7 +540,7 @@ struct f4 {
             continue;
           b = mons[j];
           I aj = mons.getid(m.first(k));
-          I cj = mons.getid(m.last(d - k - b.size()));
+          I cj = mons.getid(m.last(len - k - b.size()));
           ambiguity_ a(d, i, j, 0, 0, aj, cj);
           new_amb.push_back(a);
         }
@@ -530,7 +555,11 @@ struct f4 {
         if(i == j)
           continue;
         abc = mons[j];
-        I d = abc.size();
+        I d;
+        if constexpr(generic_order)
+          d = amb_degree(mons.weighted_degree(abc));
+        else
+          d = static_cast<I>(abc.size());
         if(d > maxdeg)
           continue;
         I ai = mons.getid(abc.first(abc.size() - b.size() - k));
@@ -681,7 +710,7 @@ struct f4 {
         }
         if(match.first == 0 or terms < best_terms
            or (terms == best_terms
-               and this->mons.template cmp<block_order>(id, match.first))) {
+               and this->mons.template cmp<generic_order>(id, match.first))) {
           match = { id, start };
           best_terms = terms;
         }
@@ -917,7 +946,7 @@ struct f4 {
     keyed_columns.reserve(n);
     for(uint32_t s = 0; s < n; s++) {
       uint64_t key = 0;
-      if constexpr(!block_order)
+      if constexpr(!generic_order)
         key = sort_key(columns[s]);
       keyed_columns.emplace_back(key, s);
     }
@@ -927,7 +956,7 @@ struct f4 {
               [this](const auto& x, const auto& y) {
                 if(x.first != y.first)
                   return x.first > y.first;
-                return this->mons.template cmp<block_order>(
+                return this->mons.template cmp<generic_order>(
                   this->columns[y.second], this->columns[x.second]);
               });
 

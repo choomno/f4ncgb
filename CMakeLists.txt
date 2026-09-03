@@ -15,8 +15,6 @@ option(ENABLE_TEST "Build f4ncgb_test program" ON)
 option(ENABLE_SIGNAL "Enable signal handling for printing statistics" ON)
 option(WIDE_MATRIX_OFFSETS "Address matrices with more than 2^32 nonzeros, at the cost of 8 bytes instead of 4 per row for two offset arrays. Off by default; without it those counts are checked and the program stops rather than wrapping." OFF)
 
-set(MAX_BLOCKS 8 CACHE STRING "Maximum number of blocks to compile for. Must be integral. Changes compilation time (duplicates implementation for each block).")
-
 set(F4NCGB_SRCS
   src/api.cpp
   src/solve.cpp
@@ -115,9 +113,6 @@ set_property(TARGET f4ncgb_bin PROPERTY CXX_STANDARD 20)
 if(TARGET mimalloc)
   target_link_libraries(f4ncgb PUBLIC mimalloc)
 endif()
-
-target_compile_definitions(f4ncgb PUBLIC F4NCGB_MAX_BLOCKS=${MAX_BLOCKS})
-message(STATUS "Compiling with " ${MAX_BLOCKS} " maximum blocks")
 
 if(WIDE_MATRIX_OFFSETS)
   message(STATUS "Matrix offsets are 64 bit")

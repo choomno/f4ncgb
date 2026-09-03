@@ -104,6 +104,130 @@ BOOST_AUTO_TEST_CASE(simple_cmp) {
   BOOST_TEST(!s.template cmp<false>(m123123_idx, m123_idx));
 }
 
+namespace {
+
+// Every word of length 1..max_len over the letters 1..nvars, so that two
+// orders can be compared on all of them.
+std::vector<std::vector<uint8_t>>
+all_words(uint8_t nvars, size_t max_len) {
+  std::vector<std::vector<uint8_t>> res;
+  std::vector<std::vector<uint8_t>> level{ {} };
+  for(size_t l = 0; l < max_len; l++) {
+    std::vector<std::vector<uint8_t>> next;
+    for(const auto& w : level)
+      for(uint8_t v = 1; v <= nvars; v++) {
+        next.push_back(w);
+        next.back().push_back(v);
+      }
+    for(const auto& w : next)
+      res.push_back(w);
+    level.swap(next);
+  }
+  return res;
+}
+
+}
+
+BOOST_AUTO_TEST_CASE(weighted_cmp) {
+  using I = impl<>;
+
+  I::monomial_store s;
+  // One block; x1 and x2 weigh 1 while x3 weighs 5.
+  s.set_order({ 3 }, { 1, 1, 5 });
+
+  I::idx x3 = s.getid({ 3 });
+  I::idx x1x2 = s.getid({ 1, 2 });
+  I::idx x2x1 = s.getid({ 2, 1 });
+  I::idx x1_5 = s.getid({ 1, 1, 1, 1, 1 });
+
+  BOOST_TEST(s.weighted_degree(s[x3]) == 5u);
+  BOOST_TEST(s.weighted_degree(s[x1x2]) == 2u);
+  BOOST_TEST(s.weighted_degree(s[x1_5]) == 5u);
+
+  // weight 5 beats length 2, where unweighted the longer word would win
+  BOOST_TEST(s.template cmp<true>(x1x2, x3));
+  BOOST_TEST(!s.template cmp<true>(x3, x1x2));
+  BOOST_TEST(!s.template cmp<false>(x1x2, x3));
+
+  // equal weighted degree falls through to lex on the letters
+  BOOST_TEST(s.template cmp<true>(x1_5, x3));
+  BOOST_TEST(s.template cmp<true>(x1x2, x2x1));
+
+  // and it stays a strict order
+  BOOST_TEST(!s.template cmp<true>(x3, x3));
+}
+
+BOOST_AUTO_TEST_CASE(weighted_block_cmp) {
+  using I = impl<>;
+
+  I::monomial_store s;
+  // Two blocks, {x1,x2} << {x3}, with x1 weighing 3.
+  s.set_order({ 2, 1 }, { 3, 1, 1 });
+
+  I::idx x3 = s.getid({ 3 });
+  I::idx x1_4 = s.getid({ 1, 1, 1, 1 });
+  I::idx x1 = s.getid({ 1 });
+  I::idx x2x2 = s.getid({ 2, 2 });
+
+  // the last block decides first, whatever the first block weighs
+  BOOST_TEST(s.template cmp<true>(x1_4, x3));
+
+  // within one block the weights decide: 3 beats 1+1
+  BOOST_TEST(s.template cmp<true>(x2x2, x1));
+}
+
+BOOST_AUTO_TEST_CASE(unit_weights_match_the_fast_path) {
+  using I = impl<>;
+
+  // One block and every weight 1 is exactly deglex, so the generic path has to
+  // agree with the fast one on every pair.
+  const auto words = all_words(3, 4);
+
+  for(bool spell_out_the_weights : { false, true }) {
+    I::monomial_store s;
+    if(spell_out_the_weights)
+      s.set_order({ 3 }, { 1, 1, 1 });
+    else
+      s.set_order({ 3 }, {});
+
+    std::vector<I::idx> ids;
+    for(const auto& w : words)
+      ids.push_back(s.getid(w));
+
+    for(I::idx a : ids)
+      for(I::idx b : ids)
+        BOOST_REQUIRE(s.template cmp<true>(a, b)
+                      == s.template cmp<false>(a, b));
+  }
+}
+
+BOOST_AUTO_TEST_CASE(weights_can_emulate_a_block) {
+  using I = impl<>;
+
+  // A weight larger than any word length makes the weighted degree read as
+  // "count of x3 first, then everything else" -- which is what the two-block
+  // order {x1,x2} << {x3} compares.
+  constexpr size_t max_len = 4;
+  const auto words = all_words(3, max_len);
+
+  I::monomial_store blocked;
+  blocked.set_order({ 2, 1 }, {});
+
+  I::monomial_store weighted;
+  weighted.set_order({ 3 }, { 1, 1, static_cast<uint32_t>(max_len + 1) });
+
+  std::vector<I::idx> b_ids, w_ids;
+  for(const auto& w : words) {
+    b_ids.push_back(blocked.getid(w));
+    w_ids.push_back(weighted.getid(w));
+  }
+
+  for(size_t i = 0; i < words.size(); i++)
+    for(size_t j = 0; j < words.size(); j++)
+      BOOST_REQUIRE(blocked.template cmp<true>(b_ids[i], b_ids[j])
+                    == weighted.template cmp<true>(w_ids[i], w_ids[j]));
+}
+
 BOOST_AUTO_TEST_CASE(simple_polynomials) {
   using I = impl<>;
   I::monomial_store s;
@@ -358,12 +482,75 @@ BOOST_AUTO_TEST_CASE(c_api_use) {
   // }
 }
 
-BOOST_AUTO_TEST_CASE(max_blocks_boundary) {
+// x*y - y*x and y - x*x, over x = 1 < y = 2. Unweighted, y is shorter than
+// x*x so the second generator leads with x*x; give y weight 5 and it leads
+// with y instead.
+static solver_result
+heavy_variable_example(const std::vector<uint32_t>& weights) {
+  Solver s;
+  s.set_blocks({ 2 });
+  if(!weights.empty())
+    s.set_weights(weights);
+
+  s.add(1, 1, { 1, 2 });
+  s.add(-1, 1, { 2, 1 });
+  s.end_poly();
+
+  s.add(1, 1, { 2 });
+  s.add(-1, 1, { 1, 1 });
+  s.end_poly();
+
+  s.set_maxiter(100);
+
+  return s.solve();
+}
+
+BOOST_AUTO_TEST_CASE(weights_move_the_leading_term) {
   f4ncgb_set_msg_printing(false);
 
-  // Exactly F4NCGB_MAX_BLOCKS blocks.
+  const Solver::monomial y{ 2 };
+  const Solver::monomial xx{ 1, 1 };
+
+  auto [res, polies] = heavy_variable_example({});
+  BOOST_REQUIRE(res == F4NCGB_OK);
+  BOOST_REQUIRE(polies.size() == 2);
+  BOOST_TEST((std::get<2>(polies[0][0]) == xx));
+
+  auto [wres, wpolies] = heavy_variable_example({ 1, 5 });
+  BOOST_REQUIRE(wres == F4NCGB_OK);
+  BOOST_REQUIRE(wpolies.size() == 2);
+  BOOST_TEST((std::get<2>(wpolies[0][0]) == y));
+
+  // uniform weights are the unweighted order, whatever the constant
+  for(uint32_t w : { 1u, 7u }) {
+    auto [ures, upolies] = heavy_variable_example({ w, w });
+    BOOST_REQUIRE(ures == F4NCGB_OK);
+    BOOST_REQUIRE(upolies.size() == polies.size());
+    BOOST_TEST((upolies == polies));
+  }
+}
+
+BOOST_AUTO_TEST_CASE(weights_are_validated) {
+  f4ncgb_set_msg_printing(false);
+
+  // one weight short of the variable count
+  BOOST_CHECK(std::get<0>(heavy_variable_example({ 1 })) == F4NCGB_ARGERROR);
+  // weight 0 would let a*m*c reorder the terms of m
+  BOOST_CHECK(std::get<0>(heavy_variable_example({ 1, 0 })) == F4NCGB_ARGERROR);
+  // and the cap that keeps the weighted degree inside a uint32_t
+  BOOST_CHECK(std::get<0>(heavy_variable_example({ 1, 65536 }))
+              == F4NCGB_ARGERROR);
+}
+
+BOOST_AUTO_TEST_CASE(many_blocks) {
+  f4ncgb_set_msg_printing(false);
+
+  // A hundred single-variable blocks: the block count has no compile-time
+  // bound any more, so nothing refuses this and cmp<true>()'s scratch buffer
+  // has to actually grow to fit them.
+  constexpr uint32_t nblocks = 100;
   Solver s;
-  s.set_blocks(std::vector<uint32_t>(F4NCGB_MAX_BLOCKS, 1));
+  s.set_blocks(std::vector<uint32_t>(nblocks, 1));
   s.set_maxiter(2);
   s.set_maxdeg(4);
 
@@ -379,12 +566,6 @@ BOOST_AUTO_TEST_CASE(max_blocks_boundary) {
   auto [res, polies] = s.solve();
   BOOST_CHECK(res == F4NCGB_OK);
   BOOST_CHECK(polies.size() == 2);
-
-  // one block more stays refused, and by the setter rather than by a crash
-  Solver too_many;
-  BOOST_CHECK_THROW(
-    too_many.set_blocks(std::vector<uint32_t>(F4NCGB_MAX_BLOCKS + 1, 1)),
-    std::runtime_error);
 }
 
 namespace {
@@ -670,7 +851,7 @@ in(int i) {
 // meet in the collection and cancel
 BOOST_AUTO_TEST_CASE(cofactor_composition_cancels) {
   test_mons mons;
-  mons.set_blocks({ 2 });
+  mons.set_order({ 2 }, {});
   const uint32_t X = mons.getid({ 1 });
 
   // index 0 is the free slot, windows are [1,3), [3,4), [4,5)
@@ -704,7 +885,7 @@ BOOST_AUTO_TEST_CASE(cofactor_composition_cancels) {
 
 BOOST_AUTO_TEST_CASE(cofactor_composition_skips_windows) {
   test_mons mons;
-  mons.set_blocks({ 2 });
+  mons.set_order({ 2 }, {});
   const uint32_t Y = mons.getid({ 2 });
 
   // windows are [1,3), [3,4), [4,5), [5,6)
@@ -740,7 +921,7 @@ BOOST_AUTO_TEST_CASE(cofactor_composition_skips_windows) {
 
 BOOST_AUTO_TEST_CASE(cofactor_composition_denominators) {
   test_mons mons;
-  mons.set_blocks({ 2 });
+  mons.set_order({ 2 }, {});
   const uint32_t X = mons.getid({ 1 });
   const uint32_t Y = mons.getid({ 2 });
 

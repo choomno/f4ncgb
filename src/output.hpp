@@ -20,6 +20,12 @@ write_header(std::ostream& o,
     }
     o << "\n";
   }
+  if(opts.weighted()) {
+    o << "w";
+    for(uint32_t w : opts.weights)
+      o << " " << w;
+    o << "\n";
+  }
   o << opts.characteristic << "\n";
   return o;
 }

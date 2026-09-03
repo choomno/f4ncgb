@@ -75,26 +75,51 @@ main(int argc, char** argv) {
   signal(SIGUSR1, handle_signal);
 #endif
 
-  po::options_description desc("f4ncgb, version " F4NCGB_VERSION "\n"
-                               "Copyright(C) 2025 Clemens Hofstadler, Maximilian Heisinger\n"
-                               "JKU Linz, Austria\n"
-                               "Repository: https://gitlab.sai.jku.at/f4ncgb/f4ncgb\n"
-                               "USAGE");
-  desc.add_options()
-    ("version", "produce version message")
-    ("help,h", "produce help message")
-    ("expanded-proof,e",  po::value<bool>(&expanded_proof)->default_value(false), "Whether the proofs should be expanded and written in terms of the input. Requires proof logging to be turned on.")
-    ("input,i", po::value<std::string>(&input_name)->default_value(""), "Set the input file (either msolve or poly; switched according to content).")
-    ("maxiter,m", po::value<size_t>(&maxiter)->default_value(10), "Maximal number of iterations of the F4-algorithm to be performed.")
-    ("maxdeg,d", po::value<size_t>(&maxdeg)->default_value(UINT_MAX), "Maximal degree of ambiguities that are considered.")
-    ("output,o", po::value<std::string>(&output_name)->default_value(""), "Set the output file.")
-    ("print-problem", po::value<bool>(&print_problem)->default_value(false), "Re-print the problem after parsing.")
-    ("proof,p",  po::value<std::string>(&proof_file)->default_value(""), "Proof logging.")
-    ("reduce,r",  po::value<bool>(&reduce)->default_value(false), "Only compute reduced form of last polynomial w.r.t. the previous ones.")
-    ("threads,T", po::value<size_t>(&threads)->default_value(1), "Number of threads to be used.")
-    ("tracer,t", po::value<bool>(&tracer)->default_value(true), "Whether computations with the first prime shall be traced. Speeds up the computation, but yields the correct result only with high probability.")
-    ("verbosity,v", po::value<int>(&verbose)->default_value(1), "Set the verbosity level.")
-  ;
+  po::options_description desc(
+    "f4ncgb, version " F4NCGB_VERSION "\n"
+    "Copyright(C) 2025 Clemens Hofstadler, Maximilian Heisinger\n"
+    "JKU Linz, Austria\n"
+    "Repository: https://gitlab.sai.jku.at/f4ncgb/f4ncgb\n"
+    "USAGE");
+  desc.add_options()("version", "produce version message")(
+    "help,h", "produce help message")(
+    "expanded-proof,e",
+    po::value<bool>(&expanded_proof)->default_value(false),
+    "Whether the proofs should be expanded and written in terms of the input. "
+    "Requires proof logging to be turned on.")(
+    "input,i",
+    po::value<std::string>(&input_name)->default_value(""),
+    "Set the input file (either msolve or poly; switched according to "
+    "content).")(
+    "maxiter,m",
+    po::value<size_t>(&maxiter)->default_value(10),
+    "Maximal number of iterations of the F4-algorithm to be performed.")(
+    "maxdeg,d",
+    po::value<size_t>(&maxdeg)->default_value(UINT_MAX),
+    "Maximal degree of ambiguities that are considered. For weighted orders "
+    "this uses the weighted degree.")(
+    "output,o",
+    po::value<std::string>(&output_name)->default_value(""),
+    "Set the output file.")(
+    "print-problem",
+    po::value<bool>(&print_problem)->default_value(false),
+    "Re-print the problem after parsing.")(
+    "proof,p",
+    po::value<std::string>(&proof_file)->default_value(""),
+    "Proof logging.")(
+    "reduce,r",
+    po::value<bool>(&reduce)->default_value(false),
+    "Only compute reduced form of last polynomial w.r.t. the previous ones.")(
+    "threads,T",
+    po::value<size_t>(&threads)->default_value(1),
+    "Number of threads to be used.")(
+    "tracer,t",
+    po::value<bool>(&tracer)->default_value(true),
+    "Whether computations with the first prime shall be traced. Speeds up the "
+    "computation, but yields the correct result only with high probability.")(
+    "verbosity,v",
+    po::value<int>(&verbose)->default_value(1),
+    "Set the verbosity level.");
 
   po::positional_options_description positional_desc;
   positional_desc.add("input", 1);
@@ -136,9 +161,6 @@ main(int argc, char** argv) {
     std::cerr << *r << std::endl;
     die(17, "Error in parsing input file.");
   }
-
-  if(opts.num_blocks() > F4NCGB_MAX_BLOCKS)
-    die(4, "More blocks than current compilation allows.");
 
   size_t characteristic = opts.characteristic;
   if(characteristic > 2147483647l)// 2^31 -1

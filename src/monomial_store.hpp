@@ -2,6 +2,7 @@
 
 #include <array>
 #include <bit>
+#include <cassert>
 #include <cstring>
 #include <optional>
 #include <vector>
@@ -15,13 +16,12 @@ namespace internal {
 
 template<internal::metadata_concept M = internal::metadata<uint8_t>,
          internal::value_concept V = uint8_t,
-         typename I = uint32_t,
-         uint16_t Nblocks = 0>
+         typename I = uint32_t>
 class monomial_store;
 
-template<metadata_concept M, value_concept V, typename I, uint16_t Nblocks>
-class monomial_store : public store<monomial_store<M, V, I, Nblocks>, M, V, I> {
-  using self = monomial_store<M, V, I, Nblocks>;
+template<metadata_concept M, value_concept V, typename I>
+class monomial_store : public store<monomial_store<M, V, I>, M, V, I> {
+  using self = monomial_store<M, V, I>;
   using base = store<self, M, V, I>;
   friend base;
 
@@ -287,45 +287,76 @@ class monomial_store : public store<monomial_store<M, V, I, Nblocks>, M, V, I> {
   }
 
   //-----------------------------------------------------------------
-  // if v is  blocks[i] <= v <= blocks[i+1], then v is in block i
-  std::vector<size_t> blocks;
-  inline void set_blocks(std::vector<size_t> block_sizes) {
-    blocks.resize(block_sizes.size() + 1);
-    size_t n = 0;
-    for(size_t i = 0; i < block_sizes.size(); i++) {
-      blocks[i] = n;
-      n += block_sizes[i];
-    }
-    blocks[blocks.size() - 1] = n;
+  // The order data of one variable
+  struct var_info {
+    uint32_t weight;
+    uint32_t block;
+  };
+  std::vector<var_info> vars_;
+  size_t nblocks_ = 1;
+  std::vector<uint64_t> block_deg_scratch_;
+
+  // Empty `block_sizes` means one block, empty `weights` means every weight 1.
+  inline void set_order(const std::vector<size_t>& block_sizes,
+                        const std::vector<uint32_t>& weights) {
+    size_t blocked = 0;
+    for(size_t n : block_sizes)
+      blocked += n;
+    const size_t num_vars = std::max(blocked, weights.size());
+
+    nblocks_ = std::max<size_t>(1, block_sizes.size());
+    block_deg_scratch_.resize(2 * nblocks_);
+
+    vars_.assign(num_vars + 1, var_info{ 1, 0 });
+
+    size_t v = 1;
+    for(size_t i = 0; i < block_sizes.size(); i++)
+      for(size_t j = 0; j < block_sizes[i]; j++, v++)
+        vars_[v].block = static_cast<uint32_t>(i);
+
+    for(size_t i = 0; i < weights.size(); i++)
+      vars_[i + 1].weight = weights[i];
   }
 
-  template<bool block_order>
+  // The weighted degree of a whole word, for the ambiguity degrees.
+  inline uint64_t weighted_degree(std::span<const V> w) const {
+    uint64_t d = 0;
+    for(V v : w) {
+      assert(static_cast<size_t>(v) < vars_.size());
+      d += vars_[v].weight;
+    }
+    return d;
+  }
+
+  inline void block_degrees(std::span<const V> w, uint64_t* out) const {
+    for(size_t i = 0; i < nblocks_; i++)
+      out[i] = 0;
+    for(V v : w) {
+      assert(static_cast<size_t>(v) < vars_.size());
+      const var_info& info = vars_[v];
+      out[info.block] += info.weight;
+    }
+  }
+
+  template<bool generic_order>
   inline bool cmp(I a, I b) {
     // this is a strict order
     if(a == b)
       return false;
 
-    size_t la, lb;
+    if constexpr(generic_order) {
+      uint64_t* da = block_deg_scratch_.data();
+      uint64_t* db = da + nblocks_;
+      block_degrees((*this)[a], da);
+      block_degrees((*this)[b], db);
 
-    if constexpr(block_order) {
-      auto a_it = (*this)[a];
-      auto b_it = (*this)[b];
-
-      for(size_t i = 0; i < Nblocks; i++) {
-        size_t n = Nblocks - i;
-        la = (size_t)std::ranges::count_if(
-          a_it,
-          [l = blocks[n - 1], u = blocks[n]](V v) { return l < v && v <= u; });
-        lb = (size_t)std::ranges::count_if(
-          b_it,
-          [l = blocks[n - 1], u = blocks[n]](V v) { return l < v && v <= u; });
-        if(la != lb)
-          return la < lb;
-      }
+      for(size_t i = nblocks_; i-- > 0;)
+        if(da[i] != db[i])
+          return da[i] < db[i];
     } else {
       // compare lengths
-      la = base::get_length(a);
-      lb = base::get_length(b);
+      const size_t la = base::get_length(a);
+      const size_t lb = base::get_length(b);
       if(la != lb)
         return la < lb;
     }

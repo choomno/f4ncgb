@@ -28,6 +28,9 @@ struct solve_options {
   // the input asks for an elimination order.
   std::vector<std::vector<var_id>> blocks;
 
+  // Weights of the variables. Empty means every weight is 1.
+  std::vector<uint32_t> weights;
+
   // Ambiguities above this degree are dropped.
   size_t maxdeg = UINT_MAX;
 
@@ -63,6 +66,31 @@ struct solve_options {
     for(size_t i = 0; i < blocks.size(); i++)
       res[i] = blocks[i].size();
     return res;
+  }
+
+  bool weighted() const { return !weights.empty(); }
+
+  // unweighted deglex
+  bool default_order() const { return num_blocks() <= 1 and !weighted(); }
+
+  std::optional<std::string> validate_weights() const {
+    if(weights.empty())
+      return std::nullopt;
+
+    if(weights.size() != num_vars)
+      return std::format(
+        "{} weights were given but the problem declares {} variables",
+        weights.size(),
+        num_vars);
+
+    for(size_t i = 0; i < weights.size(); i++)
+      if(weights[i] == 0 or weights[i] > 65535)
+        return std::format("variable {} has weight {}: weights have to lie "
+                           "in 1..65535",
+                           i + 1,
+                           weights[i]);
+
+    return std::nullopt;
   }
 
   std::optional<std::string> validate_blocks() const {

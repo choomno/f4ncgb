@@ -57,6 +57,9 @@ const char*
 f4ncgb_set_blocks(f4ncgb_handle*, uint32_t blockcount, uint32_t* blocklengths);
 
 const char*
+f4ncgb_set_weights(f4ncgb_handle*, uint32_t nweights, const uint32_t* weights);
+
+const char*
 f4ncgb_set_nvars(f4ncgb_handle*, uint32_t);
 
 const char*
@@ -145,6 +148,9 @@ class Solver {
 
   void set_blocks(std::vector<uint32_t> b) {
     check(f4ncgb_set_blocks(handle_.get(), b.size(), b.data()));
+  }
+  void set_weights(std::vector<uint32_t> w) {
+    check(f4ncgb_set_weights(handle_.get(), w.size(), w.data()));
   }
   void set_nvars(uint32_t nvars) {
     check(f4ncgb_set_nvars(handle_.get(), nvars));

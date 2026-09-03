@@ -341,6 +341,13 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
   EXPECT('\n');
   c = getc();
 
+  // An optional weight line. A characteristic cannot start with 'w', so the
+  // two are told apart by the first character.
+  if(c == 'w') {
+    if(auto err = read_weights())
+      return err;
+  }
+
   // Read the characteristic.
   EXPECT_DIGIT();
   opts_->characteristic = read_positive_int();
@@ -387,6 +394,36 @@ parser_context::read_blocks() {
   }
 
   if(auto err = opts_->validate_blocks())
+    RETURN_ERROR(*err);
+
+  return std::nullopt;
+}
+
+parse_res
+parser_context::read_weights() {
+  if(opts_->weighted())
+    RETURN_ERROR("The weights were already given by an earlier w line");
+
+  getc();
+
+  opts_->weights.reserve(opts_->num_vars);
+  for(size_t i = 0; i < opts_->num_vars; i++) {
+    swallow_whitespace_no_newline();
+    EXPECT_DIGIT();
+    const size_t w = read_positive_int();
+    EXPECT_NO_OVERFLOW();
+    if(w > std::numeric_limits<uint32_t>::max())
+      RETURN_ERROR("Weight is too large to be read");
+    opts_->weights.push_back(static_cast<uint32_t>(w));
+  }
+
+  swallow_whitespace_no_newline();
+  if(c == '\r')
+    c = getc();
+  EXPECT('\n');
+  c = getc();
+
+  if(auto err = opts_->validate_weights())
     RETURN_ERROR(*err);
 
   return std::nullopt;
@@ -552,6 +589,11 @@ parser_context::parse_header(solve_options& opts) {
 
   if(auto err = read_blocks<&parser_context::read_numeric_var>())
     return err;
+
+  if(current_c() == 'w') {
+    if(auto err = read_weights())
+      return err;
+  }
 
   impl = impl_fun;
   return std::nullopt;
