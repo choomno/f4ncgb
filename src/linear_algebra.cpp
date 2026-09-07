@@ -836,7 +836,7 @@ multimodular_gauss_elim(la_context& la,
       wanted = std::max<size_t>(wanted, 1);
       wanted = std::min(wanted, MAX_PRIMES - std::min(i, MAX_PRIMES));
       if(wanted == 0)
-        die(-1, "Multimodular Gaussian elimination is not converging");
+        die(14, "Multimodular Gaussian elimination is not converging");
 
       const bool many = pool and not used_primes.empty()
                         and used_primes.size() + wanted >= threads;
@@ -954,6 +954,8 @@ multimodular_gauss_elim(la_context& la,
 
     target = used_primes.size() + std::max<size_t>(2, used_primes.size() / 2);
     target = std::min(target, MAX_PRIMES);
+    if(target <= used_primes.size())
+      die(14, "Multimodular Gaussian elimination is not converging");
     fmpz_cleanup(nums, idxs.size());
     fmpz_cleanup(denoms, idxs.size());
   }

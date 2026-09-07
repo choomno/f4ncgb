@@ -1031,20 +1031,26 @@ struct f4 {
     }
 
     // reduction
-    F4NCGB_PROFILE(auto timer = gstats.time(gstats.reduction));
-    auto [idxs, entries] = linear_algebra(state,
-                                          idxs_spol,
-                                          idxs_red,
-                                          red_order,
-                                          entries_spol,
-                                          entries_red,
-                                          characteristic,
-                                          pool,
-                                          tracer);
+    std::pair<std::vector<std::pair<size_t, size_t>>, fmpz*> reduced;
+    {
+      F4NCGB_TIME(reduction);
+      reduced = linear_algebra(state,
+                               idxs_spol,
+                               idxs_red,
+                               red_order,
+                               entries_spol,
+                               entries_red,
+                               characteristic,
+                               pool,
+                               tracer);
+    }
+    auto& [idxs, entries] = reduced;
 
     // compute new elements
-    F4NCGB_PROFILE(auto timer2 = gstats.time(gstats.new_elements));
-    new_elements = compute_new_polynomials(idxs, entries, columns);
+    {
+      F4NCGB_TIME(new_elements);
+      new_elements = compute_new_polynomials(idxs, entries, columns);
+    }
 
     fmpz_cleanup(entries, idxs.size());
   }

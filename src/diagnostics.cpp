@@ -68,8 +68,8 @@ wall_time() {
 }
 
 static double
-percent(unsigned a, unsigned b) {
-  return b ? 100.0 * a / b : 0;
+percent(size_t a, size_t b) {
+  return b ? 100.0 * static_cast<double>(a) / static_cast<double>(b) : 0;
 }
 
 static double
