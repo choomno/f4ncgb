@@ -274,6 +274,7 @@ namespace detail {
 // the one integer multiply every SIMD extension has. The conditional add
 // replaces the branch that would otherwise bring the lanes back in range.
 #if defined(__AVX512F__)
+#define F4NCGB_HAVE_AXMY_SIMD 1
 static constexpr uint32_t simd_width = 8;
 inline void
 axmy_simd(int64_t* x, const uint32_t* a, int64_t v, int64_t p2) {
@@ -288,6 +289,7 @@ axmy_simd(int64_t* x, const uint32_t* a, int64_t v, int64_t p2) {
   _mm512_storeu_si512(x, t);
 }
 #elif defined(__AVX2__)
+#define F4NCGB_HAVE_AXMY_SIMD 1
 static constexpr uint32_t simd_width = 4;
 inline void
 axmy_simd(int64_t* x, const uint32_t* a, int64_t v, int64_t p2) {
@@ -304,6 +306,7 @@ axmy_simd(int64_t* x, const uint32_t* a, int64_t v, int64_t p2) {
   _mm256_storeu_si256(reinterpret_cast<__m256i*>(x), t);
 }
 #elif defined(__ARM_NEON)
+#define F4NCGB_HAVE_AXMY_SIMD 1
 static constexpr uint32_t simd_width = 2;
 inline void
 axmy_simd(int64_t* x, const uint32_t* a, int64_t v, int64_t p2) {
@@ -314,7 +317,7 @@ axmy_simd(int64_t* x, const uint32_t* a, int64_t v, int64_t p2) {
   vst1q_s64(x, t);
 }
 #else
-static constexpr uint32_t simd_width = 0;
+#define F4NCGB_HAVE_AXMY_SIMD 0
 #endif
 
 }
@@ -324,9 +327,10 @@ template<uint32_t B>
 inline void
 axmy_lanes(int64_t* x, const uint32_t* a, int64_t v, int64_t p2) {
   uint32_t l = 0;
-  if constexpr(detail::simd_width > 0)
-    for(; l + detail::simd_width <= B; l += detail::simd_width)
-      detail::axmy_simd(x + l, a + l, v, p2);
+#if F4NCGB_HAVE_AXMY_SIMD
+  for(; l + detail::simd_width <= B; l += detail::simd_width)
+    detail::axmy_simd(x + l, a + l, v, p2);
+#endif
   for(; l < B; l++) {
     int64_t t = x[l] - static_cast<int64_t>(a[l]) * v;
     t += (t >> 63) & p2;
