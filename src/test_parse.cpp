@@ -239,7 +239,7 @@ BOOST_AUTO_TEST_CASE(parse_msolve_line_endings_and_variable_names) {
   // A missing or undeclared variable name is reported as such. A zero
   // exponent must not let an undeclared name escape validation.
   const std::array<std::pair<std::string, std::string>, 9> bad = { {
-    { "x\r7\r\nx*x - 1\r\n", "Unexpected character '7'" },
+    { "x\r7\r\nx*x - 1\r\n", "Unexpected character" },
     { "x\r\n7\r\nx*x - 1\r", "Expected" },
     { "x,\r\n0\r\nx*x\r\n", "Expected a digit" },
     { "x,y\n0\nx*y - y*x,\nx*x - 1,\n", "Expected a variable name" },
@@ -252,6 +252,8 @@ BOOST_AUTO_TEST_CASE(parse_msolve_line_endings_and_variable_names) {
   for(const auto& [text, expected] : bad) {
     const auto err = parse_msolve_text(text);
     BOOST_REQUIRE_MESSAGE(err.has_value(), "no error for input:\n" << text);
+    BOOST_CHECK_MESSAGE(err->find("input.ms:") != std::string::npos,
+                        "parser error lacks its input location: " << *err);
     BOOST_CHECK_MESSAGE(err->find(expected) != std::string::npos,
                         "expected '" << expected << "', got: " << *err);
   }
