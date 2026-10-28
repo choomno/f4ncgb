@@ -3,7 +3,9 @@
 > This is Choomno's GitHub-hosted fork of
 > [f4ncgb](https://gitlab.sai.jku.at/f4ncgb/f4ncgb), developed by Maximilian
 > Heisinger and Clemens Hofstadler at JKU Linz. The official project remains on
-> GitLab. Local parser fixes are reviewed in [PR #1](https://github.com/choomno/f4ncgb/pull/1).
+> GitLab. The fork starts from upstream **tag `v1.1.3`**, commit
+> [`f152bb0d040d7947d4296f9d68ca849ee135629c`](https://gitlab.sai.jku.at/f4ncgb/f4ncgb/-/commit/f152bb0d040d7947d4296f9d68ca849ee135629c).
+> Local parser fixes are reviewed in [PR #1](https://github.com/choomno/f4ncgb/pull/1).
 > The original license and publication citation below apply.
 
 
