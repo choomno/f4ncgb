@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <format>
 #include <optional>
+#include <ostream>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,8 @@ struct solve_options {
   // 0 = off, 1 = cofactors, 2 = cofactors expanded in terms of the input.
   size_t proof_level = 0;
   std::string proof_file;
+  // Optional caller-owned destination, used in preference to proof_file.
+  std::ostream* proof_output = nullptr;
 
   // Remember which rows reduced to zero for the first prime and skip them for
   // the rest. Faster, and correct with high probability.

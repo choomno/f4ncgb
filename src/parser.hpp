@@ -56,6 +56,11 @@ class parser_context {
     void operator()(FILE* f) { fclose(f); }
   };
   std::unique_ptr<FILE, FILE_deleter> f;
+  std::string input_text;
+  size_t input_position = 0;
+  bool memory_input = false;
+  bool memory_eof = false;
+  std::optional<unsigned char> memory_pushback;
 
   size_t last_line = 0;
   size_t last_col = 0;
@@ -89,15 +94,28 @@ class parser_context {
   inline int current_c() const { return c; }
 
   inline int getc() {
-    assert(f);
-    if(!f || feof(f.get())) {
+    assert(f || memory_input);
+    if(memory_input ? memory_eof : (!f || feof(f.get()))) {
       this->c = EOF;
       return EOF;
     }
     last_line = line;
     last_col = col;
 
-    int c = fgetc(f.get());
+    int c;
+    if(memory_input) {
+      if(memory_pushback) {
+        c = *memory_pushback;
+        memory_pushback.reset();
+      } else if(input_position < input_text.size()) {
+        c = static_cast<unsigned char>(input_text[input_position++]);
+      } else {
+        c = EOF;
+        memory_eof = true;
+      }
+    } else {
+      c = fgetc(f.get());
+    }
 
     // Debug aid:
     // std::printf("Read '%c'\n", c);
@@ -112,12 +130,32 @@ class parser_context {
     return c;
   }
 
-  inline void ungetc(int c) { ::ungetc(c, f.get()); }
+  inline void ungetc(int c) {
+    if(memory_input) {
+      if(c != EOF) {
+        memory_pushback = static_cast<unsigned char>(c);
+        memory_eof = false;
+      }
+    } else {
+      ::ungetc(c, f.get());
+    }
+  }
 
   // Set when a number in the input did not fit
   bool number_overflow_ = false;
 
   bool number_missing_ = false;
+
+  void reset_input_state() {
+    symbols.reset();
+    opts_ = nullptr;
+    impl = {};
+    last_line = last_col = 0;
+    line = col = 1;
+    c = 0;
+    ident.clear();
+    number_overflow_ = number_missing_ = false;
+  }
 
   inline size_t read_digits(size_t limit) {
     if(c < '0' || c > '9') {
@@ -215,6 +253,8 @@ class parser_context {
     impl;
 
   parse_res open(std::filesystem::path p);
+  // The context owns these bytes; callers can release their input afterwards.
+  parse_res open_text(std::string text, std::string label = "memory input");
 
   inline std::string_view id_to_str(parser_symbolic_context::id i) const {
     return symbols->id_to_str(i);

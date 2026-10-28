@@ -105,7 +105,25 @@ parser_context::open(std::filesystem::path p) {
       "Could not open file \"{}\", error: {}", p.string(), strerror(errno));
   }
   f.reset(f_ptr);
+  reset_input_state();
+  memory_input = false;
+  memory_eof = false;
+  memory_pushback.reset();
+  input_text.clear();
   filename = p.string();
+  return std::nullopt;
+}
+
+parse_res
+parser_context::open_text(std::string text, std::string label) {
+  f.reset();
+  input_text = std::move(text);
+  input_position = 0;
+  memory_input = true;
+  memory_eof = false;
+  memory_pushback.reset();
+  filename = std::move(label);
+  reset_input_state();
   return std::nullopt;
 }
 

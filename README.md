@@ -69,6 +69,10 @@ automatically found:
 
 Then, `f4ncgb` and `f4ncgb_test` are produced.
 
+This fork also provides an optional [SQLite I/O backend](docs/SQLITE_IO.md),
+enabled with `-DENABLE_SQLITE=ON`. It reads algebra input and writes basis/proof
+bytes directly through a database; ordinary file I/O remains available.
+
 The release build automatically optimizes using `-march=native`, so
 the resulting binary may not run on a machine that does not support
 the same instructions as the builder.
