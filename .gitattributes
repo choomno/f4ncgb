@@ -1,0 +1,3 @@
+# msolve/poly benchmark and parser inputs are data, not MAXScript programs.
+*.ms -linguist-detectable
+*.poly -linguist-detectable
