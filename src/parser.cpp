@@ -172,9 +172,18 @@ parser_context::impl_msolve(parse_add_cb add_cb,
         c = getc();
         c = swallow_whitespace_no_newline();
 
+        // read_ident takes its first character unconditionally, so make sure a
+        // variable name starts here (not EOF after a trailing ',', and not the
+        // '-' of "x + -2*y").
+        if(c == EOF || !parser_context::msolve_ident_filter(c)) {
+          RETURN_ERROR("Expected a variable name");
+        }
         const std::string& ident
           = read_ident(parser_context::msolve_ident_filter);
         auto id = str_to_id(ident);
+        if(id > opts_->num_vars) {
+          RETURN_ERROR(std::format("Undeclared variable '{}'", ident));
+        }
 
         c = swallow_whitespace_no_newline();
 
@@ -230,7 +239,6 @@ parse_res
 parser_context::parse_msolve_end() {
   while(c == '\r' || c == '\n') {
     if(c == '\r') {
-      c = getc();
       READ('\n');
     } else if(c == '\n') {
       c = getc();
@@ -256,7 +264,8 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
     RETURN_ERROR("First character of msolve must be some ident, not ','");
   }
   if(parser_context::msolve_ident_filter(first_char)
-     && (second_char == ',' || second_char == ' ' || second_char == '\n')) {
+     && (second_char == ',' || second_char == ' ' || second_char == '\n'
+         || second_char == '\r')) {
     // First char was some variable that has to be counted.
     std::string ident;
     ident += first_char;
@@ -296,7 +305,7 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
   // Now, we have the first ident and are either at a ',' or at the end of the
   // variables with '\n'
   assert(opts_->num_vars == 1);
-  if(c != '\n' && c != ',' && c != ' ') {
+  if(c != '\n' && c != '\r' && c != ',' && c != ' ') {
     RETURN_ERROR(std::format(
       "Unexpected msolve parse state after first variable, have c: '{}'", c));
   }
@@ -319,12 +328,20 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
     } else if(c == ',') {
       getc();
       swallow_whitespace_no_newline();
+      if(c == '\r') {
+        c = getc();
+      }
       if(c == '\n') {
         getc();
         opts_->blocks.emplace_back();
         current_block = &opts_->blocks[opts_->blocks.size() - 1];
         // Swallow as much as needed until there is something again.
         swallow_whitespace_and_newline();
+      }
+      // As in impl_msolve: read_ident takes its first character
+      // unconditionally, so a stray byte would become a variable name.
+      if(c == EOF || !parser_context::msolve_ident_filter(c)) {
+        RETURN_ERROR("Expected a variable name");
       }
       auto id = str_to_id(read_ident(parser_context::msolve_ident_filter));
       current_block->emplace_back(id);
