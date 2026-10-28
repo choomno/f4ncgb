@@ -39,7 +39,9 @@ database_handle open_database(const std::string& path) {
   if(status != SQLITE_OK)
     fail(database.get(), "open failed");
   sqlite3_busy_timeout(database.get(), 30000);
-  execute(database.get(), "PRAGMA foreign_keys=ON");
+  // The protocol owns no foreign-key relationships. Application cascades could
+  // invoke triggers on other tables and mutate these outputs indirectly.
+  execute(database.get(), "PRAGMA foreign_keys=OFF");
   execute(database.get(), "PRAGMA trusted_schema=OFF");
   return database;
 }

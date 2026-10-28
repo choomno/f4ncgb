@@ -231,6 +231,30 @@ time.sleep(60)
         self.assertEqual(self.record("previous"), previous)
         self.assertEqual(self.record("new")[1:], (None, None, "ready"))
 
+    def test_application_cascade_cannot_mutate_proof_or_delete_another_job(self):
+        source = b"x\n0\nx*x-x\n"
+        self.enqueue("protected", source)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("CREATE UNIQUE INDEX parent_state ON f4ncgb_io(job_id,state)")
+            connection.execute("INSERT INTO f4ncgb_io VALUES (?,?,?,?,?)",
+                               ("victim", source, b"prior basis", b"prior proof", "complete"))
+            connection.execute("CREATE TABLE child (job_id TEXT,state TEXT,"
+                               "FOREIGN KEY(job_id,state) REFERENCES f4ncgb_io(job_id,state) ON UPDATE CASCADE)")
+            connection.execute("INSERT INTO child VALUES ('protected','ready')")
+            connection.execute("CREATE TRIGGER indirect_mutation AFTER UPDATE ON child BEGIN "
+                               "UPDATE f4ncgb_io SET proof=X'' WHERE job_id=NEW.job_id; "
+                               "DELETE FROM f4ncgb_io WHERE job_id='victim'; END")
+            connection.commit()
+        victim = self.record("victim")
+        result = self.solve("protected")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.record("protected"),
+                         (source, b"x*x - x\n", b"1*[i0]\n", "complete"))
+        self.assertEqual(self.record("victim"), victim)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT state FROM child").fetchall(), [("ready",)])
+
     def test_same_named_unrelated_trigger_does_not_shadow_protocol_table(self):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("DROP TABLE f4ncgb_io")

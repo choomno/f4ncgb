@@ -154,3 +154,25 @@ BOOST_AUTO_TEST_CASE(sqlite_exact_protocol_definition_preserves_string_literal_c
                "basis BLOB,proof BLOB,state TEXT NOT NULL CHECK(state IN('READY','complete')))");
   BOOST_CHECK_THROW(f4ncgb::sqlite_job(jobs.path, "job"), std::runtime_error);
 }
+
+BOOST_AUTO_TEST_CASE(sqlite_application_cascades_cannot_mutate_outputs_or_other_jobs) {
+  temporary_jobs jobs;
+  jobs.execute("PRAGMA foreign_keys=ON");
+  jobs.execute("CREATE UNIQUE INDEX parent_state ON f4ncgb_io(job_id,state)");
+  jobs.execute("INSERT INTO f4ncgb_io VALUES ('victim',X'78',X'6261736973',X'7072696f72','complete')");
+  jobs.execute("CREATE TABLE child (job_id TEXT,state TEXT,"
+               "FOREIGN KEY(job_id,state) REFERENCES f4ncgb_io(job_id,state) ON UPDATE CASCADE)");
+  jobs.execute("INSERT INTO child VALUES ('job','ready')");
+  jobs.execute("CREATE TRIGGER indirect_mutation AFTER UPDATE ON child BEGIN "
+               "UPDATE f4ncgb_io SET proof=X'' WHERE job_id=NEW.job_id; "
+               "DELETE FROM f4ncgb_io WHERE job_id='victim'; END");
+  f4ncgb::sqlite_job computation(jobs.path, "job");
+  computation.complete("correct basis", "correct proof");
+  BOOST_TEST(jobs.value("SELECT basis FROM f4ncgb_io WHERE job_id='job'") == "correct basis");
+  BOOST_TEST(jobs.value("SELECT proof FROM f4ncgb_io WHERE job_id='job'") == "correct proof");
+  BOOST_TEST(jobs.value("SELECT state FROM f4ncgb_io WHERE job_id='job'") == "complete");
+  BOOST_TEST(jobs.value("SELECT proof FROM f4ncgb_io WHERE job_id='victim'") == "prior");
+  BOOST_TEST(jobs.value("SELECT count(*) FROM f4ncgb_io") == "2");
+  BOOST_TEST(jobs.value("SELECT state FROM child") == "ready");
+  BOOST_TEST(jobs.value("PRAGMA foreign_keys") == "1");
+}

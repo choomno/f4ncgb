@@ -97,6 +97,14 @@ having no output values. If another writer changes that job or completes it
 first, publication fails without overwriting the other result. Independent jobs
 can run concurrently; SQLite coordinates their short publication transactions.
 
+The solver's connections explicitly set `PRAGMA foreign_keys=OFF`. The protocol
+has no foreign-key semantics, and native completion does not validate application
+foreign keys or invoke their cascades. Application tables must not rely on
+foreign-key actions involving `f4ncgb_io`; update dependent application metadata
+in the caller. This also prevents a cascade from invoking a trigger on another
+table that changes solver outputs or deletes another job. Triggers directly on
+the protocol table remain unsupported.
+
 Basis and proof text are buffered in memory until publication. File mode remains
 available for outputs that exceed the available memory or SQLite's BLOB limits.
 
