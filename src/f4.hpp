@@ -8,6 +8,7 @@
 #include <map>
 #include <numeric>
 #include <ostream>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -96,6 +97,7 @@ struct f4 {
   static constexpr bool generic_order = GenericOrder;
 
   std::ofstream proof_file;
+  std::ostream* proof_output = &proof_file;
 
   f4(parser_context& context_, const solve_options& opts_)
     : context(context_)
@@ -123,7 +125,11 @@ struct f4 {
     if(opts.threads > 1)
       pool = std::make_unique<BS::thread_pool<BS::none>>(opts.threads);
 
-    if(opts.proof_file != "") {
+    if(opts.proof_output) {
+      proof_output = opts.proof_output;
+      if(!*proof_output)
+        throw std::runtime_error("Failed to open proof output stream.");
+    } else if(opts.proof_file != "") {
       proof_file.open(opts.proof_file, std::ios_base::trunc);
       if(!proof_file)
         die(19, "Failed to open proof file.");
@@ -765,10 +771,10 @@ struct f4 {
       first = true;
       poly_id p = new_elements[n - basis.size()];
       for(const auto& cofactor : cofactors[n]) {
-        cofactor.log(proof_file, context, mons, cofactor_denom[n], first);
+        cofactor.log(*proof_output, context, mons, cofactor_denom[n], first);
         first = false;
       }
-      proof_file << std::endl;
+      *proof_output << std::endl;
       if(poly.get_lm_id(p) == 0)
         return;
     }
@@ -1128,10 +1134,10 @@ struct f4 {
 
       bool first = true;
       for(const auto& c : terms) {
-        c.log(proof_file, context, mons, cofactor_denom[n], first);
+        c.log(*proof_output, context, mons, cofactor_denom[n], first);
         first = false;
       }
-      proof_file << std::endl;
+      *proof_output << std::endl;
     }
   }
 };

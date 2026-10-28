@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <memory>
+#include <sstream>
 
 #include "diagnostics.hpp"
 #include "options.hpp"
@@ -13,6 +15,10 @@
 
 #include <boost/program_options.hpp>
 #include <config.hpp>
+
+#ifdef F4NCGB_ENABLE_SQLITE
+#include "sqlite_io.hpp"
+#endif
 
 #ifdef F4NCGB_ENABLE_SIGNAL
 #include <csignal>
@@ -27,6 +33,8 @@ static std::string input_name = "";
 // / Name of output files
 static std::string output_name = "";
 static std::string proof_file = "";
+static std::string sqlite_name;
+static std::string sqlite_job_id;
 
 // / Selected prime, maxiter, maxdeg, and number of threads
 static size_t maxiter = 0;
@@ -82,7 +90,12 @@ main(int argc, char** argv) {
     "Repository: https://gitlab.sai.jku.at/f4ncgb/f4ncgb\n"
     "USAGE");
   desc.add_options()("version", "produce version message")(
+    "features", "print optional I/O capabilities as JSON")(
     "help,h", "produce help message")(
+    "sqlite", po::value<std::string>(&sqlite_name)->default_value(""),
+    "Read algebra input and write basis/proof through an existing SQLite job.")(
+    "sqlite-job", po::value<std::string>(&sqlite_job_id)->default_value(""),
+    "Ready job id in the SQLite f4ncgb_io table.")(
     "expanded-proof,e",
     po::value<bool>(&expanded_proof)->default_value(false),
     "Whether the proofs should be expanded and written in terms of the input. "
@@ -142,7 +155,27 @@ main(int argc, char** argv) {
     return EXIT_SUCCESS;
   }
 
-  if(!std::filesystem::exists(input_name))
+  if(vm.count("features")) {
+#ifdef F4NCGB_ENABLE_SQLITE
+    std::cout << "{\"sqlite\":true}" << std::endl;
+#else
+    std::cout << "{\"sqlite\":false}" << std::endl;
+#endif
+    return EXIT_SUCCESS;
+  }
+
+  const bool database_mode = !vm["sqlite"].defaulted() || !vm["sqlite-job"].defaulted();
+  if(database_mode) {
+    if(sqlite_name.empty() || sqlite_job_id.empty())
+      die(79, "Both --sqlite and --sqlite-job are required.");
+    if(!vm["input"].defaulted() || !vm["output"].defaulted() || !vm["proof"].defaulted())
+      die(79, "SQLite I/O cannot be combined with input, output or proof filenames.");
+#ifndef F4NCGB_ENABLE_SQLITE
+    die(79, "SQLite I/O is disabled; build with -DENABLE_SQLITE=ON.");
+#endif
+  }
+
+  if(!database_mode && !std::filesystem::exists(input_name))
     die(err_no_file, "no input file given(try '-h')");
 
   int res = 0;
@@ -152,9 +185,28 @@ main(int argc, char** argv) {
   parser_context context;
   solve_options opts;
   parse_res r;
+#ifdef F4NCGB_ENABLE_SQLITE
+  std::unique_ptr<sqlite_job> job;
+  std::ostringstream basis_buffer, proof_buffer;
+#endif
   {
     F4NCGB_TIME(parse);
-    context.open(in);
+    if(database_mode) {
+#ifdef F4NCGB_ENABLE_SQLITE
+      try {
+        job = std::make_unique<sqlite_job>(sqlite_name, sqlite_job_id);
+        r = context.open_text(job->input(), "sqlite:" + sqlite_job_id);
+      } catch(const std::exception& error) {
+        die(79, "%s", error.what());
+      }
+#endif
+    } else {
+      r = context.open(in);
+    }
+    if(r.has_value()) {
+      std::cerr << *r << std::endl;
+      die(17, "Error in opening input.");
+    }
     r = context.parse_header(opts);
   }
   if(r.has_value()) {
@@ -172,7 +224,7 @@ main(int argc, char** argv) {
         "Provided nonzero characteristic %lu is not prime.",
         characteristic);
 
-  if(proof_file != "")
+  if(proof_file != "" || database_mode)
     user_proof_level = 1;
 
   if(user_proof_level == 0 and expanded_proof)
@@ -187,16 +239,33 @@ main(int argc, char** argv) {
   opts.threads = threads;
   opts.proof_file = proof_file;
   opts.reduce = reduce;
+#ifdef F4NCGB_ENABLE_SQLITE
+  if(database_mode)
+    opts.proof_output = &proof_buffer;
+#endif
 
   try {
+    std::ostream* output_stream = nullptr;
+#ifdef F4NCGB_ENABLE_SQLITE
+    if(database_mode)
+      output_stream = &basis_buffer;
+#endif
     res = f4ncgb::f4ncgb_main(
       context,
       opts,
       { .output_name = output_name,
+        .output_stream = output_stream,
         .stats_print_function = &print_statistics_fun,
         // the process exits right after, so leaking memory is safe
         .leak_memory = true,
         .print_read_problem = print_problem });
+#ifdef F4NCGB_ENABLE_SQLITE
+    if(database_mode && res == 0) {
+      if(!basis_buffer || !proof_buffer)
+        throw std::runtime_error("Failed to serialize SQLite basis or proof output");
+      job->complete(basis_buffer.str(), proof_buffer.str());
+    }
+#endif
   } catch(const std::exception& e) {
     die(20, "%s", e.what());
   }

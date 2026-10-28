@@ -14,6 +14,8 @@ struct run_options {
   // File the basis is written to. Empty writes to stdout, unless the callbacks
   // below are set, in which case the basis is handed to them instead.
   std::string output_name;
+  // Optional caller-owned basis destination. C API callbacks take priority.
+  std::ostream* output_stream = nullptr;
 
   // Set to the callbacks by the C API; both or neither.
   void* userdata = nullptr;

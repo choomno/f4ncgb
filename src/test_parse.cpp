@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -11,8 +12,10 @@
 #include <boost/test/unit_test.hpp>
 
 #include "options.hpp"
+#include "output.hpp"
 #include "parser.hpp"
 #include "polynomial_store.hpp"
+#include "solve.hpp"
 
 using namespace f4ncgb;
 
@@ -256,5 +259,207 @@ BOOST_AUTO_TEST_CASE(parse_msolve_line_endings_and_variable_names) {
                         "parser error lacks its input location: " << *err);
     BOOST_CHECK_MESSAGE(err->find(expected) != std::string::npos,
                         "expected '" << expected << "', got: " << *err);
+  }
+}
+
+namespace {
+struct parsed_input {
+  parse_res error;
+  solve_options options;
+  std::string polynomials;
+};
+
+parsed_input
+parse_context(parser_context& context) {
+  parsed_input result;
+  internal::monomial_store<> monomials;
+  internal::polynomial_store<> polynomials(monomials);
+  result.error = context.parse_header(result.options);
+  if(!result.error) {
+    std::vector<coeff> denominators;
+    result.error = parse_rest_into_polynomial_store(
+      context, polynomials, denominators, result.options.num_vars);
+    if(!result.error) {
+      std::ostringstream text;
+      write_all(text, context, result.options, polynomials);
+      result.polynomials = text.str();
+    }
+  }
+  return result;
+}
+
+class parser_character_probe : public parser_context {
+  public:
+  using parser_context::getc;
+  using parser_context::ungetc;
+};
+
+class failing_output_buffer : public std::streambuf {
+  int_type overflow(int_type) override { return traits_type::eof(); }
+};
+}
+
+BOOST_AUTO_TEST_CASE(memory_input_matches_file_parser_for_all_fixtures) {
+  auto fixtures = get_parse_tests_location();
+  BOOST_REQUIRE(fixtures.has_value());
+  for(const auto& entry : std::filesystem::directory_iterator(*fixtures)) {
+    if(entry.path().extension() != ".ms" && entry.path().extension() != ".poly")
+      continue;
+    std::ifstream source(entry.path(), std::ios::binary);
+    const std::string bytes((std::istreambuf_iterator<char>(source)), {});
+    parser_context file, memory;
+    BOOST_REQUIRE(!file.open(entry.path()));
+    BOOST_REQUIRE(!memory.open_text(bytes, entry.path().string()));
+    const auto expected = parse_context(file);
+    const auto actual = parse_context(memory);
+    BOOST_CHECK_MESSAGE(actual.error == expected.error, entry.path());
+    BOOST_TEST(actual.polynomials == expected.polynomials);
+    BOOST_TEST(actual.options.num_vars == expected.options.num_vars);
+    BOOST_TEST(actual.options.characteristic == expected.options.characteristic);
+    BOOST_TEST((actual.options.blocks == expected.options.blocks));
+    BOOST_TEST((actual.options.weights == expected.options.weights));
+  }
+}
+
+BOOST_AUTO_TEST_CASE(memory_input_matches_file_line_endings_and_diagnostics) {
+  temporary_parse_directory directory;
+  const auto path = directory.path() / "input.ms";
+  const std::array<std::string, 8> inputs{ {
+    "x\n0\nx*x - 1\n",
+    "x\r\n7\r\nx*x - 1\r\n",
+    "x,y\n0\nx*y - y*x,\nx*x - 1\n",
+    "x,y\r\n0\r\nx*y - y*x,\r\nx*x - 1\r\n",
+    "x,t\n0\nx*t^0 - 1\n",
+    "x,y\n0\nx*y + -1*y*x\n",
+    "x,y\n0\nx*t^0 - 1\n",
+    "x\n0\nx*"
+  } };
+  // Reuse both contexts to exercise switching/resetting input state.
+  parser_context file, memory;
+  for(const auto& input : inputs) {
+    { std::ofstream output(path, std::ios::binary); output << input; }
+    BOOST_REQUIRE(!file.open(path));
+    BOOST_REQUIRE(!memory.open_text(input, path.string()));
+    const auto expected = parse_context(file);
+    const auto actual = parse_context(memory);
+    BOOST_CHECK(actual.error == expected.error);
+    BOOST_TEST(actual.polynomials == expected.polynomials);
+  }
+  BOOST_REQUIRE(!memory.open(path));
+  BOOST_REQUIRE(!file.open(path));
+  BOOST_CHECK(parse_context(memory).error == parse_context(file).error);
+}
+
+BOOST_AUTO_TEST_CASE(memory_character_input_preserves_bytes_pushback_and_eof) {
+  temporary_parse_directory directory;
+  const auto path = directory.path() / "bytes";
+  const std::string bytes{ '\0', static_cast<char>(255), 'x', '\n' };
+  {
+    std::ofstream output(path, std::ios::binary);
+    output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  }
+  parser_character_probe file, memory;
+  BOOST_REQUIRE(!file.open(path));
+  BOOST_REQUIRE(!memory.open_text(bytes));
+  for(unsigned n = 0; n < bytes.size() + 2; ++n)
+    BOOST_TEST(memory.getc() == file.getc());
+  memory.ungetc(EOF);
+  file.ungetc(EOF);
+  BOOST_TEST(memory.getc() == file.getc());
+  memory.ungetc('y');
+  file.ungetc('y');
+  BOOST_TEST(memory.getc() == file.getc());
+  BOOST_TEST(memory.getc() == file.getc());
+}
+
+BOOST_AUTO_TEST_CASE(memory_solver_outputs_match_basis_and_proof_files) {
+  f4ncgb_set_msg_printing(false);
+  temporary_parse_directory directory;
+  const auto input = directory.path() / "input.ms";
+  const auto basis_path = directory.path() / "basis.txt";
+  const auto proof_path = directory.path() / "proof.txt";
+  for(const unsigned characteristic : { 0u, 7u }) {
+    const std::string text = "x,y\n" + std::to_string(characteristic)
+                             + "\n2*x*x-x,\n3*y*y-y,\nx*y-y*x\n";
+    { std::ofstream output(input, std::ios::binary); output << text; }
+    for(const unsigned proof_level : { 1u, 2u }) {
+      parser_context file, memory;
+      solve_options file_options, memory_options;
+      BOOST_REQUIRE(!file.open(input));
+      BOOST_REQUIRE(!memory.open_text(text));
+      BOOST_REQUIRE(!file.parse_header(file_options));
+      BOOST_REQUIRE(!memory.parse_header(memory_options));
+      std::ostringstream basis_stream, proof_stream;
+      file_options.maxiter = memory_options.maxiter = 64;
+      file_options.tracer = memory_options.tracer = false;
+      file_options.proof_level = memory_options.proof_level = proof_level;
+      file_options.proof_file = proof_path.string();
+      memory_options.proof_output = &proof_stream;
+      const auto unused_basis = directory.path() / "unused-basis.txt";
+      const auto unused_proof = directory.path() / "unused-proof.txt";
+      memory_options.proof_file = unused_proof.string();
+      run_options file_run, memory_run;
+      file_run.output_name = basis_path.string();
+      memory_run.output_stream = &basis_stream;
+      memory_run.output_name = unused_basis.string();
+      BOOST_REQUIRE(f4ncgb_main(file, file_options, file_run) == 0);
+      BOOST_REQUIRE(f4ncgb_main(memory, memory_options, memory_run) == 0);
+      std::ifstream basis_file(basis_path), proof_file(proof_path);
+      const std::string basis((std::istreambuf_iterator<char>(basis_file)), {});
+      const std::string proof((std::istreambuf_iterator<char>(proof_file)), {});
+      BOOST_REQUIRE(!basis.empty());
+      BOOST_REQUIRE(!proof.empty());
+      BOOST_TEST(basis_stream.str() == basis);
+      BOOST_TEST(proof_stream.str() == proof);
+      BOOST_TEST(!std::filesystem::exists(unused_basis));
+      BOOST_TEST(!std::filesystem::exists(unused_proof));
+    }
+  }
+}
+
+BOOST_AUTO_TEST_CASE(memory_solver_rejects_failed_output_streams) {
+  auto make_context = [](parser_context& context, solve_options& options) {
+    BOOST_REQUIRE(!context.open_text("x\n7\nx*x-x\n"));
+    BOOST_REQUIRE(!context.parse_header(options));
+    options.tracer = false;
+  };
+  {
+    parser_context context;
+    solve_options options;
+    make_context(context, options);
+    std::ostringstream failed;
+    failed.setstate(std::ios::badbit);
+    options.proof_level = 1;
+    options.proof_output = &failed;
+    run_options run;
+    BOOST_CHECK_THROW(f4ncgb_main(context, options, run), std::runtime_error);
+  }
+  {
+    parser_context context;
+    solve_options options;
+    make_context(context, options);
+    failing_output_buffer buffer;
+    std::ostream failed(&buffer);
+    options.proof_level = 1;
+    options.proof_output = &failed;
+    std::ostringstream basis;
+    run_options run;
+    run.output_stream = &basis;
+    BOOST_CHECK_THROW(f4ncgb_main(context, options, run), std::runtime_error);
+    BOOST_TEST(basis.str().empty());
+  }
+  {
+    parser_context context;
+    solve_options options;
+    make_context(context, options);
+    std::ostringstream failed;
+    failed.setstate(std::ios::badbit);
+    run_options run;
+    run.output_stream = &failed;
+    std::function<void()> statistics;
+    run.stats_print_function = &statistics;
+    BOOST_CHECK_THROW(f4ncgb_main(context, options, run), std::runtime_error);
+    BOOST_REQUIRE(static_cast<bool>(statistics));
+    BOOST_CHECK_NO_THROW(statistics());
   }
 }

@@ -27,6 +27,14 @@ struct f4_base {
   virtual void print_parameters(const std::string& output_name) = 0;
 };
 
+struct stats_hook_reset {
+  std::function<void()>* hook;
+  ~stats_hook_reset() {
+    if(hook)
+      *hook = []() {};
+  }
+};
+
 template<bool GenericOrder, typename V>
 struct f4_wrapper : f4_base {
   f4<GenericOrder, V> algo;
@@ -93,7 +101,8 @@ struct f4_wrapper : f4_base {
     if(opts.proof_level > 1)
       proof_str += "(expanded) ";
     if(opts.proof_level > 0)
-      proof_str += "(writing to " + opts.proof_file + ")";
+      proof_str += opts.proof_output ? "(writing to output stream)"
+                                    : "(writing to " + opts.proof_file + ")";
 
     msg("Characteristic:    %lu", opts.characteristic);
     if(!opts.reduce) {
@@ -138,6 +147,7 @@ f4ncgb_main(parser_context& context,
       }
 
       auto& algo = *algo_ptr;
+      stats_hook_reset reset_hook{ run.stats_print_function };
 
       {
         F4NCGB_TIME(parse);
@@ -159,12 +169,18 @@ f4ncgb_main(parser_context& context,
       }
 
       if(verbose > 0)
-        algo.print_parameters(run.output_name);
+        algo.print_parameters(run.output_stream ? "output stream" : run.output_name);
 
       if(opts.reduce)
         algo.reduced_form();
       else
         algo.compute_basis();
+
+      if(opts.proof_output) {
+        opts.proof_output->flush();
+        if(!*opts.proof_output)
+          throw std::runtime_error("Failed to write proof output stream.");
+      }
 
       if(verbose > 0) {
         if(opts.reduce)
@@ -176,19 +192,18 @@ f4ncgb_main(parser_context& context,
       if(run.add_cb && run.end_poly_cb) {
         algo.write_basis(run.userdata, run.add_cb, run.end_poly_cb);
       } else {
-        std::ostream* out_file = &std::cout;
+        std::ostream* out_file = run.output_stream ? run.output_stream : &std::cout;
         std::ofstream filestream;
-        if(run.output_name != "") {
+        if(!run.output_stream && run.output_name != "") {
           filestream.open(run.output_name, std::ios_base::trunc);
           if(!filestream)
             die(18, "Failed to open output file.");
           out_file = &filestream;
         }
         algo.write_basis(*out_file);
-      }
-
-      if(run.stats_print_function) {
-        *run.stats_print_function = []() {};
+        out_file->flush();
+        if(!*out_file)
+          throw std::runtime_error("Failed to write basis output stream.");
       }
 
 #if defined(__has_feature) && NDEBUG
