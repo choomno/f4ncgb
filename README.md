@@ -1,5 +1,12 @@
 # f4ncgb
 
+> This is Choomno's GitHub-hosted fork of
+> [f4ncgb](https://gitlab.sai.jku.at/f4ncgb/f4ncgb), developed by Maximilian
+> Heisinger and Clemens Hofstadler at JKU Linz. The official project remains on
+> GitLab. Local parser fixes are reviewed in [PR #1](https://github.com/choomno/f4ncgb/pull/1).
+> The original license and publication citation below apply.
+
+
 `f4ncgb` ("fancy-gb") is an open-source C++ library for computing noncommutative Gröbner bases
 in free algebras (with rational coefficients or coefficients in a prime field). 
 It transfers recent advancements in commutative Gröbner basis software to the
