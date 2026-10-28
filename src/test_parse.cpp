@@ -195,6 +195,23 @@ BOOST_AUTO_TEST_CASE(parse_msolve_line_endings_and_variable_names) {
     "x,y\r\n0\r\nx*y - y*x,\r\nx*x - 1\r\n");
   BOOST_CHECK_MESSAGE(!crlf.has_value(), crlf.value_or(""));
 
+  // A one-variable header ends immediately after its first character. CRLF
+  // must follow the same path as LF rather than being mistaken for an identifier.
+  solve_options single_lf_options, single_crlf_options;
+  const auto single_lf = parse_msolve_text(
+    "x\n7\nx*x - 1\n", &single_lf_options);
+  const auto single_crlf = parse_msolve_text(
+    "x\r\n7\r\nx*x - 1\r\n", &single_crlf_options);
+  BOOST_REQUIRE_MESSAGE(!single_lf.has_value(), single_lf.value_or(""));
+  BOOST_REQUIRE_MESSAGE(!single_crlf.has_value(), single_crlf.value_or(""));
+  const std::vector<std::vector<solve_options::var_id>> single_block{ { 1 } };
+  BOOST_TEST(single_lf_options.num_vars == 1u);
+  BOOST_TEST(single_crlf_options.num_vars == single_lf_options.num_vars);
+  BOOST_TEST((single_lf_options.blocks == single_block));
+  BOOST_TEST((single_crlf_options.blocks == single_lf_options.blocks));
+  BOOST_TEST(single_lf_options.characteristic == 7u);
+  BOOST_TEST(single_crlf_options.characteristic == single_lf_options.characteristic);
+
   // Both line endings must preserve the variable count and the same two
   // elimination blocks, not merely accept the header without an error.
   solve_options lf_options, crlf_options;
@@ -221,7 +238,9 @@ BOOST_AUTO_TEST_CASE(parse_msolve_line_endings_and_variable_names) {
 
   // A missing or undeclared variable name is reported as such. A zero
   // exponent must not let an undeclared name escape validation.
-  const std::array<std::pair<std::string, std::string>, 7> bad = { {
+  const std::array<std::pair<std::string, std::string>, 9> bad = { {
+    { "x\r7\r\nx*x - 1\r\n", "Unexpected character '7'" },
+    { "x\r\n7\r\nx*x - 1\r", "Expected" },
     { "x,\r\n0\r\nx*x\r\n", "Expected a digit" },
     { "x,y\n0\nx*y - y*x,\nx*x - 1,\n", "Expected a variable name" },
     { "x,y\n0\nx*y + -1*y*x\n", "Expected a variable name" },

@@ -264,7 +264,8 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
     RETURN_ERROR("First character of msolve must be some ident, not ','");
   }
   if(parser_context::msolve_ident_filter(first_char)
-     && (second_char == ',' || second_char == ' ' || second_char == '\n')) {
+     && (second_char == ',' || second_char == ' ' || second_char == '\n'
+         || second_char == '\r')) {
     // First char was some variable that has to be counted.
     std::string ident;
     ident += first_char;
@@ -304,7 +305,7 @@ parser_context::impl_msolve_header(char first_char, char second_char) {
   // Now, we have the first ident and are either at a ',' or at the end of the
   // variables with '\n'
   assert(opts_->num_vars == 1);
-  if(c != '\n' && c != ',' && c != ' ') {
+  if(c != '\n' && c != '\r' && c != ',' && c != ' ') {
     RETURN_ERROR(std::format(
       "Unexpected msolve parse state after first variable, have c: '{}'", c));
   }
