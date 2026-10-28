@@ -177,7 +177,7 @@ Both formats accept an optional `w` line carrying one positive integer weight pe
 
 This should produce the following output:
 
-    Running 30 test cases...
+    Running 31 test cases...
      
     *** No errors detected
 

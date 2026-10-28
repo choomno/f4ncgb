@@ -5,6 +5,12 @@ new
 
   - Weighted monomial orders
 
+## Fixes
+
+  - Accept `msolve` input whose last line ends in CRLF
+  - Report a missing or undeclared variable name in `msolve` input with its
+    location, instead of inventing a variable
+
 v1.1.2
 ==========
 
