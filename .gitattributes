@@ -1,3 +1,4 @@
 # msolve/poly benchmark and parser inputs are data, not MAXScript programs.
-*.ms -linguist-detectable
-*.poly -linguist-detectable
+# Preserve their exact bytes, including intentional parser-test line endings.
+*.ms -text -linguist-detectable linguist-language=Text
+*.poly -text -linguist-detectable linguist-language=Text
